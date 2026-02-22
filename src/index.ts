@@ -374,6 +374,9 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
 
   function getBestThumbnail(thumbnails?: Array<{ url: string; width?: number; height?: number }>): string {
     if (!Array.isArray(thumbnails) || thumbnails.length === 0) return '';
-    return thumbnails[thumbnails.length - 1]?.url ?? '';
+    let url = thumbnails[thumbnails.length - 1]?.url ?? '';
+    // YouTube sometimes returns protocol-relative URLs (//yt3.ggpht.com/...)
+    if (url.startsWith('//')) url = 'https:' + url;
+    return url;
   }
 }
