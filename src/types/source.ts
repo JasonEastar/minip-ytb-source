@@ -11,7 +11,6 @@ import type {
   MediaCapabilities,
   MediaItem,
   AudioPlaybackInfo,
-  VideoPlaybackInfo,
   MediaFeedSection,
   MediaCollection,
   SubtitleTrack,
@@ -31,17 +30,13 @@ export interface MediaSource {
   initialize(): Promise<void>;
   dispose(): Promise<void>;
 
-  // ─── Audio ──────────────────────────────────────────────────
+  // ─── Playback ───────────────────────────────────────────────
 
-  getAudioUrl(contentId: string): Promise<AudioPlaybackInfo>;
-  getDirectAudioUrl(contentId: string): Promise<AudioPlaybackInfo>;
-  getDownloadInfo(contentId: string): Promise<DownloadInfo>;
+  /** Get a streaming URL for playback (may be HLS, DASH, or direct). */
+  getStreamUrl(contentId: string): Promise<AudioPlaybackInfo>;
 
-  // ─── Video ──────────────────────────────────────────────────
-
-  getVideoInfo?(contentId: string): Promise<VideoPlaybackInfo | null>;
-  getVideoUrlForQuality?(contentId: string, height: number): Promise<{ url: string; hasAudio: boolean } | null>;
-  getFilteredHlsUrl?(height: number): string | null;
+  /** Get a direct download URL + content length for offline caching. */
+  getDownloadUrl(contentId: string): Promise<DownloadInfo>;
 
   // ─── Search ─────────────────────────────────────────────────
 

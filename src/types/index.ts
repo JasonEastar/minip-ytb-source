@@ -11,8 +11,6 @@ export type {
   MediaCapabilities,
   MediaItem,
   AudioPlaybackInfo,
-  VideoPlaybackInfo,
-  VideoQuality,
   SubtitleTrack,
   MediaFeedSection,
   MediaFeedItem,

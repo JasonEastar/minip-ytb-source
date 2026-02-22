@@ -10,14 +10,12 @@
  *   module.exports = function createSource(host) { ... return source; }
  */
 
-import { InnertubeService, buildDashManifest } from './ytbapi';
+import { InnertubeService } from './ytbapi';
 import type { SourceHost } from './types/host';
 import type { MediaSource } from './types/source';
 import type {
   MediaItem,
   AudioPlaybackInfo,
-  VideoPlaybackInfo,
-  VideoQuality,
   MediaFeedSection,
   MediaFeedItem,
   MediaCollection,
@@ -77,9 +75,9 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
       yt.invalidateSession();
     },
 
-    // ── Audio ─────────────────────────────────────────────────
+    // ── Playback ──────────────────────────────────────────────
 
-    async getAudioUrl(contentId: string): Promise<AudioPlaybackInfo> {
+    async getStreamUrl(contentId: string): Promise<AudioPlaybackInfo> {
       const info = await getCachedVideoInfo(contentId);
       if (!info) throw new Error('Failed to get video info for ' + contentId);
 
@@ -89,7 +87,7 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
         .sort((a: any, b: any) => parseInt(b.bitrate || '0') - parseInt(a.bitrate || '0'));
 
       if (audioFormats.length > 0) {
-        host.log('Got audio URL for', contentId, `(${audioFormats[0].mimeType})`);
+        host.log('Got stream URL for', contentId, `(${audioFormats[0].mimeType})`);
         return { url: audioFormats[0].url };
       }
 
@@ -102,11 +100,7 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
       throw new Error('No audio format available for ' + contentId);
     },
 
-    async getDirectAudioUrl(contentId: string): Promise<AudioPlaybackInfo> {
-      return source.getAudioUrl(contentId);
-    },
-
-    async getDownloadInfo(contentId: string): Promise<DownloadInfo> {
+    async getDownloadUrl(contentId: string): Promise<DownloadInfo> {
       const info = await getCachedVideoInfo(contentId);
       if (!info) throw new Error('Failed to get video info for ' + contentId);
 
@@ -121,91 +115,6 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
         };
       }
       throw new Error('No audio format available for download');
-    },
-
-    // ── Video ─────────────────────────────────────────────────
-
-    async getVideoInfo(contentId: string): Promise<VideoPlaybackInfo | null> {
-      try {
-        const info = await getCachedVideoInfo(contentId);
-        if (!info) return null;
-
-        // Android → DASH manifest
-        if (host.platform === 'android') {
-          try {
-            const manifest = buildDashManifest(info);
-            if (manifest) {
-              const uri = host.writeCacheFile('dash_manifest.mpd', manifest);
-              return { url: uri, isDash: true, isHLS: false, hasAudio: true, qualities: [], defaultHeight: 0 };
-            }
-          } catch (e) {
-            host.log('DASH generation failed:', e);
-          }
-        }
-
-        // Build quality list from adaptive video formats
-        const videoFormats = (info.adaptiveFormats ?? []).filter(
-          (f: any) => f.url && f.mimeType?.startsWith('video/') && f.height,
-        );
-        const byHeight = new Map<number, { url: string; hasAudio: boolean; label: string }>();
-
-        for (const f of videoFormats) {
-          const h = parseInt(f.height);
-          if (h && !byHeight.has(h)) {
-            byHeight.set(h, { url: f.url, hasAudio: false, label: f.qualityLabel || `${h}p` });
-          }
-        }
-
-        // Muxed formats (audio+video)
-        const muxedFormats = (info.urlFormats ?? []).filter(
-          (f: any) => f.url && f.mimeType?.startsWith('video/') && f.height,
-        );
-        for (const f of muxedFormats) {
-          const h = parseInt(f.height);
-          if (h) byHeight.set(h, { url: f.url, hasAudio: true, label: f.qualityLabel || `${h}p` });
-        }
-
-        const qualities: VideoQuality[] = [];
-        for (const [height, entry] of byHeight) {
-          qualities.push({ label: entry.label, height, hasAudio: entry.hasAudio });
-        }
-        qualities.sort((a, b) => a.height - b.height);
-
-        if (qualities.length === 0) return null;
-
-        const defaultQ = qualities.reduce((best, q) =>
-          Math.abs(q.height - 720) < Math.abs(best.height - 720) ? q : best,
-        );
-        const entry = byHeight.get(defaultQ.height)!;
-        return { url: entry.url, isDash: false, isHLS: false, hasAudio: entry.hasAudio, qualities, defaultHeight: defaultQ.height };
-      } catch (e) {
-        host.log('Failed to fetch video info:', e);
-        return null;
-      }
-    },
-
-    async getVideoUrlForQuality(contentId: string, targetHeight: number): Promise<{ url: string; hasAudio: boolean } | null> {
-      try {
-        const info = await getCachedVideoInfo(contentId);
-        if (!info) return null;
-
-        // Muxed first
-        const muxed = (info.urlFormats ?? []).find(
-          (f: any) => f.url && f.mimeType?.startsWith('video/') && parseInt(f.height) === targetHeight,
-        );
-        if (muxed) return { url: muxed.url, hasAudio: true };
-
-        // Adaptive
-        const adaptive = (info.adaptiveFormats ?? []).find(
-          (f: any) => f.url && f.mimeType?.startsWith('video/') && parseInt(f.height) === targetHeight,
-        );
-        if (adaptive) return { url: adaptive.url, hasAudio: false };
-        return null;
-      } catch { return null; }
-    },
-
-    getFilteredHlsUrl(_height: number): string | null {
-      return null; // ytbapi uses direct URLs, not HLS
     },
 
     // ── Search ────────────────────────────────────────────────
