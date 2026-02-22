@@ -81,6 +81,7 @@ export interface AudioPlaybackInfo {
   url: string;
   headers?: Record<string, string>;
   expiresAt?: number;
+  isHLS?: boolean;
 }
 
 export interface VideoPlaybackInfo {

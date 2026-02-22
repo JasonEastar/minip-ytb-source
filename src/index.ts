@@ -86,7 +86,7 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
       // iOS: prefer HLS (native audio streaming support)
       if (host.platform === 'ios' && info.hlsManifestUrl) {
         host.log('Using HLS for', contentId);
-        return { url: info.hlsManifestUrl, headers };
+        return { url: info.hlsManifestUrl, headers, isHLS: true };
       }
 
       // Direct audio-only from adaptive formats
