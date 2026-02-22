@@ -163,6 +163,24 @@ export interface SearchResults {
   artists: SearchArtistResult[];
 }
 
+// ─── Artist / Channel ───────────────────────────────────────────
+
+export interface ArtistSection {
+  title: string;
+  type: 'songs' | 'albums' | 'singles' | 'videos' | 'playlists' | 'related' | 'other';
+  items: MediaFeedItem[];
+}
+
+export interface ArtistInfo {
+  id: string;
+  name: string;
+  description?: string;
+  thumbnail: string;
+  subscribers?: string;
+  sections: ArtistSection[];
+  sourceId: string;
+}
+
 // ─── Download ───────────────────────────────────────────────────
 
 export interface DownloadInfo {

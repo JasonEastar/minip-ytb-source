@@ -17,6 +17,7 @@ import type {
   SubtitleTrack,
   DownloadInfo,
   SearchResults,
+  ArtistInfo,
 } from './media';
 
 export interface MediaSource {
@@ -55,6 +56,10 @@ export interface MediaSource {
   // ─── Collections ────────────────────────────────────────────
 
   getCollection?(browseId: string): Promise<MediaCollection>;
+
+  // ─── Artist / Channel ───────────────────────────────────────
+
+  getArtist?(browseId: string): Promise<ArtistInfo>;
 
   // ─── Suggestions ────────────────────────────────────────────
 

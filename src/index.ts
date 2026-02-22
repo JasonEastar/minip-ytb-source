@@ -24,6 +24,8 @@ import type {
   DownloadInfo,
   SearchResults,
   SearchArtistResult,
+  ArtistInfo,
+  ArtistSection,
 } from '../types/media';
 
 const SOURCE_ID = 'youtube';
@@ -487,6 +489,92 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
         try { const t = parseMusicListItem(item); if (t) collectionItems.push(t); } catch { /* skip */ }
       }
       return { title, subtitle, thumbnail, items: collectionItems, collectionType: 'playlist' };
+    },
+
+    // ── Artist / Channel ───────────────────────────────────────
+
+    async getArtist(browseId: string): Promise<ArtistInfo> {
+      const innertube = await getInnertube(ClientType.ANDROID_MUSIC);
+      const artist = await innertube.music.getArtist(browseId) as unknown as Record<string, unknown>;
+
+      // Header info
+      const header = artist.header as Record<string, unknown> | undefined;
+      const name = (header?.title as InnertubeText)?.text ?? '';
+      const description = (header?.description as string) ?? undefined;
+      const subscribers = (header?.subtitle as InnertubeText)?.text ?? undefined;
+
+      // Thumbnail
+      let thumbnail = '';
+      const thumbObj = header?.thumbnail as Record<string, unknown> | undefined;
+      if (thumbObj) {
+        const contents = (thumbObj.contents ?? thumbObj.thumbnails) as Array<{ url?: string }> | undefined;
+        if (Array.isArray(contents) && contents.length > 0) {
+          thumbnail = contents[contents.length - 1]?.url ?? '';
+        }
+      }
+
+      // Sections
+      const rawSections = (artist.sections ?? []) as Array<Record<string, unknown>>;
+      const sections: ArtistSection[] = [];
+
+      for (const section of rawSections) {
+        const sectionTitle = (section.title as InnertubeText)?.text
+          ?? ((section.header as Record<string, unknown>)?.title as InnertubeText)?.text
+          ?? '';
+        const sectionContents = (section.contents ?? []) as Array<Record<string, unknown>>;
+        if (sectionContents.length === 0) continue;
+
+        // Detect section type from items
+        const firstItemType = sectionContents[0]?.item_type as string | undefined;
+        let sectionType: ArtistSection['type'] = 'other';
+        const titleLower = sectionTitle.toLowerCase();
+
+        if (firstItemType === 'song') sectionType = 'songs';
+        else if (firstItemType === 'video') sectionType = 'videos';
+        else if (firstItemType === 'playlist') sectionType = 'playlists';
+        else if (firstItemType === 'artist') sectionType = 'related';
+        else if (firstItemType === 'album') {
+          sectionType = (titleLower.includes('single') || titleLower.includes('ep')) ? 'singles' : 'albums';
+        }
+
+        const items: MediaFeedItem[] = [];
+        for (const item of sectionContents) {
+          try {
+            const itemType = item.item_type as string | undefined;
+            const itemTitle = (item.title as InnertubeText)?.text ?? (item.name as string) ?? '';
+            const itemSubtitle = (item.subtitle as InnertubeText)?.text ?? '';
+            if (!itemTitle) continue;
+
+            const ep = item.endpoint as { payload?: { browseId?: string; videoId?: string } } | undefined;
+            const itemBrowseId = ep?.payload?.browseId ?? '';
+            const videoId = ep?.payload?.videoId ?? (item.id as string) ?? '';
+            const isVideo = itemType === 'song' || itemType === 'video';
+
+            let feedType: MediaFeedItem['type'] = 'unknown';
+            if (itemType === 'song') feedType = 'song';
+            else if (itemType === 'video') feedType = 'song';
+            else if (itemType === 'album') feedType = 'album';
+            else if (itemType === 'playlist') feedType = 'playlist';
+            else if (itemType === 'artist') feedType = 'artist';
+
+            items.push({
+              id: itemBrowseId || videoId || itemTitle,
+              title: itemTitle,
+              subtitle: itemSubtitle,
+              thumbnail: deepExtractThumbnail(item as unknown as InnertubeListItem),
+              type: feedType,
+              trackId: isVideo ? videoId : undefined,
+              browseId: itemBrowseId || undefined,
+            });
+          } catch { /* skip */ }
+        }
+
+        if (items.length > 0) {
+          sections.push({ title: sectionTitle, type: sectionType, items });
+        }
+      }
+
+      return { id: browseId, name, description, thumbnail, subscribers, sections, sourceId: SOURCE_ID };
     },
 
     // ── Suggestions ───────────────────────────────────────────
