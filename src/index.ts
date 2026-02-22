@@ -120,6 +120,7 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
         return {
           url: audioFormats[0].url,
           contentLength: parseInt(audioFormats[0].contentLength || '0'),
+          headers: { 'User-Agent': 'com.google.ios.youtube/20.11.6 (iPhone10,4; U; CPU iOS 16_7_7 like Mac OS X)' },
         };
       }
       throw new Error('No audio format available for download');
