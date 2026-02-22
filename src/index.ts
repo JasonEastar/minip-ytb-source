@@ -81,17 +81,23 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
       const info = await getCachedVideoInfo(contentId);
       if (!info) throw new Error('Failed to get video info for ' + contentId);
 
-      // Best audio from adaptive formats
+      // Priority 1: HLS manifest (adaptive bitrate, long-lived URL)
+      if (info.hlsManifestUrl) {
+        host.log('Using HLS for', contentId);
+        return { url: info.hlsManifestUrl };
+      }
+
+      // Priority 2: Best audio from adaptive formats
       const audioFormats = (info.adaptiveFormats ?? [])
         .filter((f: any) => f.url && f.mimeType?.startsWith('audio/'))
         .sort((a: any, b: any) => parseInt(b.bitrate || '0') - parseInt(a.bitrate || '0'));
 
       if (audioFormats.length > 0) {
-        host.log('Got stream URL for', contentId, `(${audioFormats[0].mimeType})`);
+        host.log('Using direct audio for', contentId, `(${audioFormats[0].mimeType})`);
         return { url: audioFormats[0].url };
       }
 
-      // Fallback: muxed formats
+      // Priority 3: muxed formats
       const urlFormats = (info.urlFormats ?? []).filter((f: any) => f.url);
       if (urlFormats.length > 0) {
         return { url: urlFormats[0].url };
