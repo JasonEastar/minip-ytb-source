@@ -376,36 +376,40 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
 
       try {
         const innertube = await getInnertube(ClientType.ANDROID_MUSIC);
-        const musicSearch = await (innertube.music as unknown as {
-          search(query: string, filters?: Record<string, string>): Promise<Record<string, unknown>>;
-        }).search(query);
+        const musicSearch = await innertube.music.search(query) as unknown as Record<string, unknown>;
 
-        // Parse tracks from songs shelf
-        const songsShelves = (musicSearch as unknown as { contents?: Array<Record<string, unknown>> }).contents ?? [];
-        for (const shelf of songsShelves) {
-          if ((shelf.type ?? '') !== 'MusicShelf') continue;
-          const shelfTitle = ((shelf as Record<string, unknown>).title as InnertubeText)?.text?.toLowerCase() ?? '';
-          const contents = (shelf.contents ?? []) as InnertubeListItem[];
+        // Use the Search class getter properties directly
+        const artistsShelf = (musicSearch as unknown as { artists?: { contents?: InnertubeListItem[] } }).artists;
+        const songsShelf = (musicSearch as unknown as { songs?: { contents?: InnertubeListItem[] } }).songs;
+        const videosShelf = (musicSearch as unknown as { videos?: { contents?: InnertubeListItem[] } }).videos;
 
-          // Artist shelf
-          if (shelfTitle.includes('artist')) {
-            for (const item of contents) {
-              try {
-                const parsed = parseArtistSearchItem(item);
-                if (parsed) artists.push(parsed);
-              } catch { /* skip */ }
-            }
-            continue;
+        // Parse artists
+        if (artistsShelf?.contents) {
+          for (const item of artistsShelf.contents) {
+            try {
+              const parsed = parseArtistSearchItem(item as unknown as InnertubeListItem);
+              if (parsed) artists.push(parsed);
+            } catch { /* skip */ }
           }
+        }
 
-          // Songs / Videos shelf
-          if (shelfTitle.includes('song') || shelfTitle.includes('video') || shelfTitle.includes('top result')) {
-            for (const item of contents) {
-              try {
-                const t = parseMusicListItem(item);
-                if (t) tracks.push(t);
-              } catch { /* skip */ }
-            }
+        // Parse songs
+        if (songsShelf?.contents) {
+          for (const item of songsShelf.contents) {
+            try {
+              const t = parseMusicListItem(item as unknown as InnertubeListItem);
+              if (t) tracks.push(t);
+            } catch { /* skip */ }
+          }
+        }
+
+        // Parse videos if no songs found
+        if (tracks.length === 0 && videosShelf?.contents) {
+          for (const item of videosShelf.contents) {
+            try {
+              const t = parseMusicListItem(item as unknown as InnertubeListItem);
+              if (t) tracks.push(t);
+            } catch { /* skip */ }
           }
         }
       } catch (e) {
