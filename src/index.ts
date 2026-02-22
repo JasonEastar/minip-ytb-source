@@ -169,30 +169,23 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
     // ── Audio ─────────────────────────────────────────────────
 
     async getAudioUrl(contentId: string): Promise<AudioPlaybackInfo> {
-      // Use getCachedVideoInfo so the result is cached for later getVideoInfo calls
-      const { info, innertube } = await getCachedVideoInfo(contentId);
+      const innertube = await getInnertube();
 
       if (host.platform === 'ios') {
-        // Check if HLS URL is already in the ANDROID response first
-        const hlsUrl = info.streaming_data?.hls_manifest_url;
-        if (hlsUrl) {
-          host.log('Got HLS URL for', contentId, '(from cached info)');
-          return { url: hlsUrl, headers: { 'User-Agent': YT_USER_AGENT } };
-        }
-        // Only try IOS client if ANDROID didn't have HLS
         try {
           const basicInfo = await innertube.getBasicInfo(contentId, 'IOS' as 'IOS');
-          const iosHlsUrl = basicInfo.streaming_data?.hls_manifest_url;
-          if (iosHlsUrl) {
-            host.log('Got HLS URL for', contentId, '(from IOS client)');
-            return { url: iosHlsUrl, headers: { 'User-Agent': YT_USER_AGENT } };
+          const hlsUrl = basicInfo.streaming_data?.hls_manifest_url;
+          if (hlsUrl) {
+            host.log('Got HLS URL for', contentId);
+            return { url: hlsUrl, headers: { 'User-Agent': YT_USER_AGENT } };
           }
         } catch (e) {
           host.log('IOS client failed for', contentId, e);
         }
-        host.log('No HLS URL for', contentId, ', using ANDROID format');
+        host.log('No HLS URL for', contentId, ', trying ANDROID');
       }
 
+      const info = await innertube.getShortsVideoInfo(contentId, 'ANDROID') as unknown as InnertubeVideoInfo;
       const format = info.chooseFormat({ quality: 'best', type: 'audio' });
       const url = await format.decipher(innertube.session.player);
       host.log('Got direct URL for', contentId, `(${format.mime_type})`);
@@ -200,14 +193,16 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
     },
 
     async getDirectAudioUrl(contentId: string): Promise<AudioPlaybackInfo> {
-      const { info, innertube } = await getCachedVideoInfo(contentId);
+      const innertube = await getInnertube();
+      const info = await innertube.getShortsVideoInfo(contentId, 'ANDROID') as unknown as InnertubeVideoInfo;
       const format = info.chooseFormat({ quality: 'best', type: 'audio' });
       const url = await format.decipher(innertube.session.player);
       return { url, headers: { 'User-Agent': YT_USER_AGENT } };
     },
 
     async getDownloadInfo(contentId: string): Promise<DownloadInfo> {
-      const { info, innertube } = await getCachedVideoInfo(contentId);
+      const innertube = await getInnertube();
+      const info = await innertube.getShortsVideoInfo(contentId, 'ANDROID') as unknown as InnertubeVideoInfo;
       const format = info.chooseFormat({ quality: 'best', type: 'audio' });
       const url = await format.decipher(innertube.session.player);
       return {
