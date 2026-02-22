@@ -81,26 +81,28 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
       const info = await getCachedVideoInfo(contentId);
       if (!info) throw new Error('Failed to get video info for ' + contentId);
 
-      // Priority 1: Best audio-only from adaptive formats
+      const headers = { 'User-Agent': 'com.google.ios.youtube/20.11.6 (iPhone10,4; U; CPU iOS 16_7_7 like Mac OS X)' };
+
+      // iOS: prefer HLS (native audio streaming support)
+      if (host.platform === 'ios' && info.hlsManifestUrl) {
+        host.log('Using HLS for', contentId);
+        return { url: info.hlsManifestUrl, headers };
+      }
+
+      // Direct audio-only from adaptive formats
       const audioFormats = (info.adaptiveFormats ?? [])
         .filter((f: any) => f.url && f.mimeType?.startsWith('audio/'))
         .sort((a: any, b: any) => parseInt(b.bitrate || '0') - parseInt(a.bitrate || '0'));
 
       if (audioFormats.length > 0) {
         host.log('Using direct audio for', contentId, `(${audioFormats[0].mimeType})`);
-        return { url: audioFormats[0].url };
+        return { url: audioFormats[0].url, headers };
       }
 
-      // Priority 2: muxed formats
+      // Muxed formats fallback
       const urlFormats = (info.urlFormats ?? []).filter((f: any) => f.url);
       if (urlFormats.length > 0) {
-        return { url: urlFormats[0].url };
-      }
-
-      // Priority 3: HLS fallback (contains video+audio, not ideal for audio-only)
-      if (info.hlsManifestUrl) {
-        host.log('Using HLS fallback for', contentId);
-        return { url: info.hlsManifestUrl };
+        return { url: urlFormats[0].url, headers };
       }
 
       throw new Error('No audio format available for ' + contentId);
