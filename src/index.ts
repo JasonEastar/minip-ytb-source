@@ -376,40 +376,49 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
 
       try {
         const innertube = await getInnertube(ClientType.ANDROID_MUSIC);
-        const musicSearch = await innertube.music.search(query) as unknown as Record<string, unknown>;
+        const musicSearch = await innertube.music.search(query);
 
-        // Use the Search class getter properties directly
-        const artistsShelf = (musicSearch as unknown as { artists?: { contents?: InnertubeListItem[] } }).artists;
-        const songsShelf = (musicSearch as unknown as { songs?: { contents?: InnertubeListItem[] } }).songs;
-        const videosShelf = (musicSearch as unknown as { videos?: { contents?: InnertubeListItem[] } }).videos;
+        // Iterate all shelves in contents and check each item's item_type
+        // (item_type is locale-independent, unlike shelf titles)
+        const contents = (musicSearch as unknown as { contents?: unknown[] }).contents ?? [];
+        for (const shelf of contents) {
+          const shelfObj = shelf as Record<string, unknown>;
+          const shelfContents = (shelfObj.contents ?? []) as Array<Record<string, unknown>>;
 
-        // Parse artists
-        if (artistsShelf?.contents) {
-          for (const item of artistsShelf.contents) {
+          for (const item of shelfContents) {
             try {
-              const parsed = parseArtistSearchItem(item as unknown as InnertubeListItem);
-              if (parsed) artists.push(parsed);
-            } catch { /* skip */ }
-          }
-        }
+              const itemType = item.item_type as string | undefined;
 
-        // Parse songs
-        if (songsShelf?.contents) {
-          for (const item of songsShelf.contents) {
-            try {
-              const t = parseMusicListItem(item as unknown as InnertubeListItem);
-              if (t) tracks.push(t);
-            } catch { /* skip */ }
-          }
-        }
+              if (itemType === 'artist') {
+                // Parse artist item using its direct properties
+                const name = (item.name as string) ?? '';
+                const browseEndpoint = item.endpoint as { payload?: { browseId?: string } } | undefined;
+                const browseId = browseEndpoint?.payload?.browseId ?? '';
 
-        // Parse videos if no songs found
-        if (tracks.length === 0 && videosShelf?.contents) {
-          for (const item of videosShelf.contents) {
-            try {
-              const t = parseMusicListItem(item as unknown as InnertubeListItem);
-              if (t) tracks.push(t);
-            } catch { /* skip */ }
+                if (name && browseId) {
+                  const thumbnails = (item as unknown as { thumbnails?: Array<{ url?: string }> }).thumbnails;
+                  let thumbnail = '';
+                  if (Array.isArray(thumbnails) && thumbnails.length > 0) {
+                    thumbnail = thumbnails[thumbnails.length - 1]?.url ?? '';
+                  }
+                  if (!thumbnail) {
+                    thumbnail = deepExtractThumbnail(item as unknown as InnertubeListItem);
+                  }
+
+                  artists.push({
+                    id: browseId,
+                    name,
+                    thumbnail,
+                    subscribers: (item.subscribers as string) ?? undefined,
+                    sourceId: SOURCE_ID,
+                    browseId,
+                  });
+                }
+              } else if (itemType === 'song' || itemType === 'video') {
+                const t = parseMusicListItem(item as unknown as InnertubeListItem);
+                if (t) tracks.push(t);
+              }
+            } catch { /* skip malformed items */ }
           }
         }
       } catch (e) {
