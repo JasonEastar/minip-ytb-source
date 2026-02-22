@@ -22,6 +22,8 @@ import type {
   MediaFeedItem,
   MediaCollection,
   DownloadInfo,
+  SearchResults,
+  SearchArtistResult,
 } from '../types/media';
 
 const SOURCE_ID = 'youtube';
@@ -165,23 +167,30 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
     // ── Audio ─────────────────────────────────────────────────
 
     async getAudioUrl(contentId: string): Promise<AudioPlaybackInfo> {
-      const innertube = await getInnertube();
+      // Use getCachedVideoInfo so the result is cached for later getVideoInfo calls
+      const { info, innertube } = await getCachedVideoInfo(contentId);
 
       if (host.platform === 'ios') {
+        // Check if HLS URL is already in the ANDROID response first
+        const hlsUrl = info.streaming_data?.hls_manifest_url;
+        if (hlsUrl) {
+          host.log('Got HLS URL for', contentId, '(from cached info)');
+          return { url: hlsUrl, headers: { 'User-Agent': YT_USER_AGENT } };
+        }
+        // Only try IOS client if ANDROID didn't have HLS
         try {
           const basicInfo = await innertube.getBasicInfo(contentId, 'IOS' as 'IOS');
-          const hlsUrl = basicInfo.streaming_data?.hls_manifest_url;
-          if (hlsUrl) {
-            host.log('Got HLS URL for', contentId);
-            return { url: hlsUrl, headers: { 'User-Agent': YT_USER_AGENT } };
+          const iosHlsUrl = basicInfo.streaming_data?.hls_manifest_url;
+          if (iosHlsUrl) {
+            host.log('Got HLS URL for', contentId, '(from IOS client)');
+            return { url: iosHlsUrl, headers: { 'User-Agent': YT_USER_AGENT } };
           }
         } catch (e) {
           host.log('IOS client failed for', contentId, e);
         }
-        host.log('No HLS URL for', contentId, ', trying ANDROID');
+        host.log('No HLS URL for', contentId, ', using ANDROID format');
       }
 
-      const info = await innertube.getShortsVideoInfo(contentId, 'ANDROID') as unknown as InnertubeVideoInfo;
       const format = info.chooseFormat({ quality: 'best', type: 'audio' });
       const url = await format.decipher(innertube.session.player);
       host.log('Got direct URL for', contentId, `(${format.mime_type})`);
@@ -189,16 +198,14 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
     },
 
     async getDirectAudioUrl(contentId: string): Promise<AudioPlaybackInfo> {
-      const innertube = await getInnertube();
-      const info = await innertube.getShortsVideoInfo(contentId, 'ANDROID') as unknown as InnertubeVideoInfo;
+      const { info, innertube } = await getCachedVideoInfo(contentId);
       const format = info.chooseFormat({ quality: 'best', type: 'audio' });
       const url = await format.decipher(innertube.session.player);
       return { url, headers: { 'User-Agent': YT_USER_AGENT } };
     },
 
     async getDownloadInfo(contentId: string): Promise<DownloadInfo> {
-      const innertube = await getInnertube();
-      const info = await innertube.getShortsVideoInfo(contentId, 'ANDROID') as unknown as InnertubeVideoInfo;
+      const { info, innertube } = await getCachedVideoInfo(contentId);
       const format = info.chooseFormat({ quality: 'best', type: 'audio' });
       const url = await format.decipher(innertube.session.player);
       return {
@@ -220,13 +227,16 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
         if (host.platform === 'ios') {
           let hlsUrl: string | undefined = sd.hls_manifest_url;
 
+          // Only try the expensive IOS client if ANDROID response didn't have HLS URL
           if (!hlsUrl) {
             try {
               const basicInfo = await innertube.getBasicInfo(contentId, 'IOS' as 'IOS');
               hlsUrl = basicInfo.streaming_data?.hls_manifest_url;
             } catch (e) {
-              host.log('IOS client getBasicInfo failed:', e);
+              host.log('IOS client getBasicInfo failed, skipping HLS:', e);
             }
+          } else {
+            host.log('Using HLS URL from cached ANDROID response');
           }
 
           if (hlsUrl) {
@@ -358,6 +368,59 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
         }
         return suggestions.filter(Boolean);
       } catch { return []; }
+    },
+
+    async searchGrouped(query: string): Promise<SearchResults> {
+      const tracks: MediaItem[] = [];
+      const artists: SearchArtistResult[] = [];
+
+      try {
+        const innertube = await getInnertube(ClientType.ANDROID_MUSIC);
+        const musicSearch = await (innertube.music as unknown as {
+          search(query: string, filters?: Record<string, string>): Promise<Record<string, unknown>>;
+        }).search(query);
+
+        // Parse tracks from songs shelf
+        const songsShelves = (musicSearch as unknown as { contents?: Array<Record<string, unknown>> }).contents ?? [];
+        for (const shelf of songsShelves) {
+          if ((shelf.type ?? '') !== 'MusicShelf') continue;
+          const shelfTitle = ((shelf as Record<string, unknown>).title as InnertubeText)?.text?.toLowerCase() ?? '';
+          const contents = (shelf.contents ?? []) as InnertubeListItem[];
+
+          // Artist shelf
+          if (shelfTitle.includes('artist')) {
+            for (const item of contents) {
+              try {
+                const parsed = parseArtistSearchItem(item);
+                if (parsed) artists.push(parsed);
+              } catch { /* skip */ }
+            }
+            continue;
+          }
+
+          // Songs / Videos shelf
+          if (shelfTitle.includes('song') || shelfTitle.includes('video') || shelfTitle.includes('top result')) {
+            for (const item of contents) {
+              try {
+                const t = parseMusicListItem(item);
+                if (t) tracks.push(t);
+              } catch { /* skip */ }
+            }
+          }
+        }
+      } catch (e) {
+        host.log('searchGrouped error:', e);
+      }
+
+      // Fallback: if no tracks from music search, use regular search
+      if (tracks.length === 0) {
+        try {
+          const fallback = await source.search!(query);
+          tracks.push(...fallback);
+        } catch { /* ignore */ }
+      }
+
+      return { tracks, artists };
     },
 
     // ── Feed ──────────────────────────────────────────────────
@@ -632,6 +695,40 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
     }
     if (!title) return null;
     return { id: browseId || videoId || title, title, subtitle, thumbnail: deepExtractThumbnail(item), type, trackId: isValidVideoId ? videoId : undefined, browseId: browseId || undefined };
+  }
+
+  function parseArtistSearchItem(item: InnertubeListItem): SearchArtistResult | null {
+    const flexCols = item.flex_columns ?? item.flexColumns ?? [];
+    let name = '';
+    if (flexCols[0]) {
+      const col = flexCols[0].title ?? flexCols[0].text;
+      name = col?.text ?? col?.runs?.[0]?.text ?? '';
+    }
+    if (!name && item.title?.text) name = item.title.text;
+    if (!name) return null;
+
+    const endpoint = item.endpoint ?? item.navigation_endpoint;
+    const browseId = endpoint?.payload?.browseId ?? '';
+    if (!browseId) return null;
+
+    let subscribers: string | undefined;
+    if (flexCols[1]) {
+      const col = flexCols[1].title ?? flexCols[1].text;
+      const subText = col?.text ?? '';
+      if (subText) subscribers = subText;
+    }
+    if (!subscribers && (item as Record<string, unknown>).subscribers) {
+      subscribers = String((item as Record<string, unknown>).subscribers);
+    }
+
+    return {
+      id: browseId,
+      name,
+      thumbnail: deepExtractThumbnail(item),
+      subscribers,
+      sourceId: SOURCE_ID,
+      browseId,
+    };
   }
 
   function parseLockupViewModel(lockup: LockupViewModel): MediaItem | null {

@@ -147,6 +147,22 @@ export interface MediaCollection {
   children?: MediaCollection[];
 }
 
+// ─── Search Results ─────────────────────────────────────────────
+
+export interface SearchArtistResult {
+  id: string;
+  name: string;
+  thumbnail: string;
+  subscribers?: string;
+  sourceId: string;
+  browseId: string;
+}
+
+export interface SearchResults {
+  tracks: MediaItem[];
+  artists: SearchArtistResult[];
+}
+
 // ─── Download ───────────────────────────────────────────────────
 
 export interface DownloadInfo {

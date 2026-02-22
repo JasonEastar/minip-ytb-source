@@ -16,6 +16,7 @@ import type {
   MediaCollection,
   SubtitleTrack,
   DownloadInfo,
+  SearchResults,
 } from './media';
 
 export interface MediaSource {
@@ -44,6 +45,7 @@ export interface MediaSource {
   // ─── Search ─────────────────────────────────────────────────
 
   search?(query: string): Promise<MediaItem[]>;
+  searchGrouped?(query: string): Promise<SearchResults>;
   getSearchSuggestions?(query: string): Promise<string[]>;
 
   // ─── Feed ───────────────────────────────────────────────────
