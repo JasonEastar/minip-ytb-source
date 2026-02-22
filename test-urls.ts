@@ -1,7 +1,5 @@
 /**
- * Test: download via range requests (simulating ParallelDownloader),
- * then verify the defragmented output.
- * 
+ * Test: compare IOS vs ANDROID client URLs for download.
  * Usage: npx tsx test-urls.ts [videoId]
  */
 import { InnertubeService } from './src/ytbapi/index.js';
@@ -9,111 +7,84 @@ import { writeFileSync } from 'fs';
 import { execSync } from 'child_process';
 
 const VIDEO_ID = process.argv[2] || 'dQw4w9WgXcQ';
-const IOS_UA = 'com.google.ios.youtube/20.11.6 (iPhone10,4; U; CPU iOS 16_7_7 like Mac OS X)';
 
-async function main() {
-  const yt = new InnertubeService({ disableDecipher: true });
-
-  console.log(`\n=== Testing video: ${VIDEO_ID} ===\n`);
-
-  const info = await yt.getVideoInfo(VIDEO_ID, 'IOS');
-  if (!info) { console.error('❌ Failed to get video info'); process.exit(1); }
-  console.log(`Title: ${info.title}`);
+async function testClient(yt: InnertubeService, client: string, videoId: string) {
+  console.log(`\n--- ${client} client ---`);
+  const info = await yt.getVideoInfo(videoId, client);
+  if (!info) { console.log('❌ Failed to get info'); return; }
 
   const audioFormats = (info.adaptiveFormats ?? [])
     .filter((f: any) => f.url && f.mimeType?.startsWith('audio/'))
     .sort((a: any, b: any) => parseInt(b.bitrate || '0') - parseInt(a.bitrate || '0'));
 
-  if (audioFormats.length === 0) { console.error('❌ No audio formats'); process.exit(1); }
+  console.log(`Audio formats: ${audioFormats.length}`);
+  for (const f of audioFormats) {
+    console.log(`  itag=${f.itag} mime=${f.mimeType} bitrate=${f.bitrate} len=${f.contentLength}`);
+  }
+
+  if (audioFormats.length === 0) return;
 
   const best = audioFormats[0];
   const contentLength = parseInt(best.contentLength || '0');
-  console.log(`Format: itag=${best.itag} mime=${best.mimeType} size=${contentLength}`);
-  console.log(`formatType=${best.formatType} initRange=${best.initRange} indexRange=${best.indexRange}`);
+  const ua = client === 'IOS'
+    ? 'com.google.ios.youtube/20.11.6 (iPhone10,4; U; CPU iOS 16_7_7 like Mac OS X)'
+    : 'com.google.android.youtube/19.29.37 (Linux; U; Android 14) gzip';
 
-  // Download using range requests (like ParallelDownloader does)
-  const NUM_THREADS = 4;
-  const chunkSize = Math.ceil(contentLength / NUM_THREADS);
-  const chunks: Buffer[] = [];
-
-  console.log(`\nDownloading in ${NUM_THREADS} chunks of ~${chunkSize} bytes...`);
-
-  for (let i = 0; i < NUM_THREADS; i++) {
-    const start = i * chunkSize;
-    const end = Math.min((i + 1) * chunkSize - 1, contentLength - 1);
-
-    const resp = await fetch(best.url, {
-      headers: {
-        'User-Agent': IOS_UA,
-        'Range': `bytes=${start}-${end}`,
-      },
-    });
-
-    if (resp.status !== 206) {
-      console.error(`   ❌ Chunk ${i}: got status ${resp.status} (expected 206)`);
-      continue;
-    }
-
-    const buf = Buffer.from(await resp.arrayBuffer());
-    chunks.push(buf);
-    console.log(`   Chunk ${i}: ${start}-${end} → ${buf.length} bytes (status ${resp.status})`);
-  }
-
-  // Merge chunks
-  const merged = Buffer.concat(chunks);
-  console.log(`\nMerged size: ${merged.length} (expected: ${contentLength})`);
-
-  // Save raw download
-  const rawFile = `/tmp/test-raw-${VIDEO_ID}.m4a`;
-  writeFileSync(rawFile, merged);
-  console.log(`Saved raw download: ${rawFile}`);
-
-  // Analyze structure
-  analyzeMP4(merged);
-
-  // Try to probe with ffprobe
+  // Try downloading
   try {
-    const result = execSync(`ffprobe -v error -show_format -show_streams "${rawFile}" 2>&1`).toString();
-    console.log(`\n[ffprobe] Raw file:\n${result.slice(0, 500)}`);
-  } catch (e: any) {
-    console.log(`\n[ffprobe] Raw file error: ${e.stdout?.toString().slice(0, 300) || e.message}`);
-  }
+    const resp = await fetch(best.url!, {
+      headers: { 'User-Agent': ua, 'Range': `bytes=0-${Math.min(contentLength - 1, 65535)}` },
+    });
+    console.log(`  Download test: HTTP ${resp.status}, Content-Type: ${resp.headers.get('content-type')}`);
+    if (resp.status === 200 || resp.status === 206) {
+      const buf = Buffer.from(await resp.arrayBuffer());
+      const ftyp = buf.length >= 12 ? buf.subarray(4, 8).toString('ascii') : '??';
+      const brand = buf.length >= 12 ? buf.subarray(8, 12).toString('ascii') : '??';
+      console.log(`  ✅ Got ${buf.length} bytes, ftyp=${ftyp}, brand=${brand}`);
 
-  console.log('\n=== Done ===\n');
+      // Full download
+      const fullResp = await fetch(best.url!, {
+        headers: { 'User-Agent': ua, 'Range': `bytes=0-${contentLength - 1}` },
+      });
+      if (fullResp.status === 200 || fullResp.status === 206) {
+        const fullBuf = Buffer.from(await fullResp.arrayBuffer());
+        const file = `/tmp/yt-${client.toLowerCase()}-${videoId}.m4a`;
+        writeFileSync(file, fullBuf);
+        console.log(`  Full download: ${fullBuf.length}/${contentLength} bytes → ${file}`);
+
+        // ffprobe
+        try {
+          const out = execSync(`ffprobe -v error -show_format "${file}" 2>&1`, { timeout: 10000 }).toString();
+          const fmt = out.match(/format_name=(.+)/)?.[1];
+          const dur = out.match(/duration=(.+)/)?.[1];
+          console.log(`  ffprobe: format=${fmt}, duration=${dur}`);
+        } catch (e: any) {
+          console.log(`  ffprobe error`);
+        }
+
+        // Decode test
+        try {
+          execSync(`ffmpeg -y -v error -i "${file}" -t 5 -f null /dev/null 2>&1`, { timeout: 15000 });
+          console.log(`  ✅ PLAYABLE`);
+        } catch {
+          console.log(`  ❌ NOT playable`);
+        }
+      } else {
+        console.log(`  ❌ Full download failed: HTTP ${fullResp.status}`);
+      }
+    } else {
+      console.log(`  ❌ Download blocked`);
+    }
+  } catch (e) {
+    console.log(`  ❌ Error:`, e);
+  }
 }
 
-function analyzeMP4(data: Buffer) {
-  console.log('\n[MP4 Box Analysis]');
-  let pos = 0;
-  let moofCount = 0;
-
-  while (pos + 8 <= data.length) {
-    const size = data.readUInt32BE(pos);
-    const type = data.subarray(pos + 4, pos + 8).toString('ascii');
-
-    if (size < 8 || pos + size > data.length) {
-      console.log(`   ⚠️  Truncated/invalid box at offset ${pos}: size=${size} type=${type}`);
-      break;
-    }
-
-    if (type === 'moof') moofCount++;
-
-    // Only log the first few and last few
-    if (moofCount <= 3 || type !== 'moof') {
-      console.log(`   ${type} @ ${pos} (${size} bytes)`);
-    } else if (moofCount === 4) {
-      console.log(`   ... (more moof boxes)`);
-    }
-
-    pos += size;
-  }
-
-  if (moofCount > 0) {
-    console.log(`   Total moof (fragments): ${moofCount}`);
-    console.log(`   ⚠️  Fragmented MP4 — defragmentation needed`);
-  } else {
-    console.log(`   ✅ Regular MP4 — no defragmentation needed`);
-  }
+async function main() {
+  const yt = new InnertubeService({ disableDecipher: true });
+  console.log(`Testing video: ${VIDEO_ID}`);
+  await testClient(yt, 'IOS', VIDEO_ID);
+  await testClient(yt, 'ANDROID', VIDEO_ID);
 }
 
 main().catch(console.error);

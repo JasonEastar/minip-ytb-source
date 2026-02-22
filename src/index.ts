@@ -109,7 +109,8 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
     },
 
     async getDownloadUrl(contentId: string): Promise<DownloadInfo> {
-      const info = await getCachedVideoInfo(contentId);
+      // Use ANDROID client for downloads — more compatible with parallel range requests
+      const info = await yt.getVideoInfo(contentId, 'ANDROID');
       if (!info) throw new Error('Failed to get video info for ' + contentId);
 
       const audioFormats = (info.adaptiveFormats ?? [])
@@ -118,9 +119,9 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
 
       if (audioFormats.length > 0) {
         return {
-          url: audioFormats[0].url,
+          url: audioFormats[0].url!,
           contentLength: parseInt(audioFormats[0].contentLength || '0'),
-          headers: { 'User-Agent': 'com.google.ios.youtube/20.11.6 (iPhone10,4; U; CPU iOS 16_7_7 like Mac OS X)' },
+          headers: { 'User-Agent': 'com.google.android.youtube/19.29.37 (Linux; U; Android 14) gzip' },
         };
       }
       throw new Error('No audio format available for download');
