@@ -4,12 +4,14 @@
  * This file is the entry point for building the YouTube source as a
  * standalone JS bundle. It uses ONLY the SourceHost APIs (no @/ imports).
  *
- * Build: rollup bundles this + ytbapi into a single JS file.
+ * Build: rollup bundles this + youtubei.js + the browse adapter into a single
+ * JS file.
  *
  * Bundle format:
  *   module.exports = function createSource(host) { ... return source; }
  */
 
+import { ClientType, Innertube } from 'youtubei.js/react-native';
 import { InnertubeService } from './ytbapi';
 import type { SourceHost } from './types/host';
 import type { MediaSource } from './types/source';
@@ -27,25 +29,79 @@ import type {
 } from './types/media';
 
 const SOURCE_ID = 'youtube';
+const VIDEO_INFO_CACHE_MS = 4 * 60 * 1000;
+const IOS_USER_AGENT =
+  'com.google.ios.youtube/20.11.6 (iPhone10,4; U; CPU iOS 16_7_7 like Mac OS X)';
+type OfficialVideoInfo = Awaited<ReturnType<Innertube['getBasicInfo']>>;
+type OfficialFormat =
+  NonNullable<OfficialVideoInfo['streaming_data']>['adaptive_formats'][number];
 
 // ─── Factory ────────────────────────────────────────────────────
 
 export default function createYouTubeSource(host: SourceHost): MediaSource {
   let yt: InnertubeService;
+  let mediaYt: Innertube | null = null;
 
   // ── Video Info Cache ────────────────────────────────────────
 
-  type VideoInfoCache = { contentId: string; info: any };
+  type VideoInfoCache = { contentId: string; info: any; cachedAt: number };
   let _videoInfoCache: VideoInfoCache | null = null;
+  let _officialVideoInfoCache: {
+    contentId: string;
+    info: OfficialVideoInfo;
+    cachedAt: number;
+  } | null = null;
 
   async function getCachedVideoInfo(contentId: string): Promise<any> {
-    if (_videoInfoCache?.contentId === contentId) {
+    if (
+      _videoInfoCache?.contentId === contentId &&
+      Date.now() - _videoInfoCache.cachedAt < VIDEO_INFO_CACHE_MS
+    ) {
       return _videoInfoCache.info;
     }
     // IOS client gives direct URLs — no deciphering needed
     const info = await yt.getVideoInfo(contentId, 'IOS');
-    if (info) _videoInfoCache = { contentId, info };
+    if (info) {
+      _videoInfoCache = { contentId, info, cachedAt: Date.now() };
+    }
     return info;
+  }
+
+  async function getOfficialVideoInfo(
+    contentId: string,
+    client: 'IOS' | 'ANDROID',
+    useCache: boolean,
+  ): Promise<OfficialVideoInfo> {
+    if (!mediaYt) {
+      throw new Error('YouTube.js media client is unavailable');
+    }
+    if (
+      useCache &&
+      client === 'IOS' &&
+      _officialVideoInfoCache?.contentId === contentId &&
+      Date.now() - _officialVideoInfoCache.cachedAt < VIDEO_INFO_CACHE_MS
+    ) {
+      return _officialVideoInfoCache.info;
+    }
+
+    const info = await mediaYt.getBasicInfo(contentId, { client });
+    if (useCache && client === 'IOS') {
+      _officialVideoInfoCache = { contentId, info, cachedAt: Date.now() };
+    }
+    return info;
+  }
+
+  function selectAudioFormat(info: OfficialVideoInfo): OfficialFormat | undefined {
+    const formats = (info.streaming_data?.adaptive_formats ?? [])
+      .filter((format) => format.has_audio && !format.has_video && Boolean(format.url))
+      .sort((a, b) => {
+        // Cache files use an m4a extension, so prefer AAC/MP4 over Opus/WebM.
+        const aIsMp4 = a.mime_type.includes('audio/mp4') ? 1 : 0;
+        const bIsMp4 = b.mime_type.includes('audio/mp4') ? 1 : 0;
+        if (aIsMp4 !== bIsMp4) return bIsMp4 - aIsMp4;
+        return (b.bitrate || 0) - (a.bitrate || 0);
+      });
+    return formats[0];
   }
 
   // ── Source Implementation ───────────────────────────────────
@@ -53,7 +109,7 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
   const source: MediaSource = {
     id: SOURCE_ID,
     name: 'YouTube Music',
-    version: '1.0.0',
+    version: '1.1.0',
     capabilities: {
       audio: true,
       video: true,
@@ -69,59 +125,109 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
       yt = new InnertubeService({
         disableDecipher: true, // IOS client provides direct URLs
       });
+
+      try {
+        mediaYt = await Innertube.create({
+          // A WEB base session keeps generic endpoints (notably search)
+          // compatible with YouTube.js' parser. Media requests explicitly
+          // override this with IOS/ANDROID below to obtain direct URLs.
+          client_type: ClientType.WEB,
+          enable_session_cache: true,
+          fail_fast: false,
+          generate_session_locally: true,
+          retrieve_innertube_config: false,
+          retrieve_player: false,
+          fetch: host.fetch,
+        });
+      } catch (error) {
+        // Browse/search can still operate through the lightweight adapter. The
+        // playback methods below also retain a fallback for older installs.
+        host.log('YouTube.js media client initialization failed:', error);
+        mediaYt = null;
+      }
     },
 
     async dispose(): Promise<void> {
       yt.invalidateSession();
+      mediaYt = null;
+      _officialVideoInfoCache = null;
     },
 
     // ── Playback ──────────────────────────────────────────────
 
     async getStreamUrl(contentId: string): Promise<AudioPlaybackInfo> {
-      const info = await getCachedVideoInfo(contentId);
-      if (!info) throw new Error('Failed to get video info for ' + contentId);
+      try {
+        const info = await getOfficialVideoInfo(contentId, 'IOS', true);
+        const headers = { 'User-Agent': IOS_USER_AGENT };
 
-      const headers = { 'User-Agent': 'com.google.ios.youtube/20.11.6 (iPhone10,4; U; CPU iOS 16_7_7 like Mac OS X)' };
+        if (host.platform === 'ios' && info.streaming_data?.hls_manifest_url) {
+          host.log('Using YouTube.js HLS for', contentId);
+          return {
+            url: info.streaming_data.hls_manifest_url,
+            headers,
+            isHLS: true,
+          };
+        }
 
-      // iOS: prefer HLS (native audio streaming support)
-      if (host.platform === 'ios' && info.hlsManifestUrl) {
-        host.log('Using HLS for', contentId);
-        return { url: info.hlsManifestUrl, headers, isHLS: true };
+        const format = selectAudioFormat(info);
+        if (format?.url) {
+          host.log('Using YouTube.js direct audio for', contentId, `(${format.mime_type})`);
+          return { url: format.url, headers };
+        }
+      } catch (error) {
+        host.log('YouTube.js stream lookup failed, using adapter fallback:', error);
       }
 
-      // Direct audio-only from adaptive formats
-      const audioFormats = (info.adaptiveFormats ?? [])
-        .filter((f: any) => f.url && f.mimeType?.startsWith('audio/'))
+      const fallbackInfo = await getCachedVideoInfo(contentId);
+      if (!fallbackInfo) throw new Error('Failed to get video info for ' + contentId);
+      const fallbackHeaders = { 'User-Agent': IOS_USER_AGENT };
+
+      if (host.platform === 'ios' && fallbackInfo.hlsManifestUrl) {
+        return {
+          url: fallbackInfo.hlsManifestUrl,
+          headers: fallbackHeaders,
+          isHLS: true,
+        };
+      }
+
+      const fallbackFormats = (fallbackInfo.adaptiveFormats ?? [])
+        .filter((format: any) => format.url && format.mimeType?.startsWith('audio/'))
         .sort((a: any, b: any) => parseInt(b.bitrate || '0') - parseInt(a.bitrate || '0'));
-
-      if (audioFormats.length > 0) {
-        host.log('Using direct audio for', contentId, `(${audioFormats[0].mimeType})`);
-        return { url: audioFormats[0].url, headers };
+      if (fallbackFormats[0]?.url) {
+        return { url: fallbackFormats[0].url, headers: fallbackHeaders };
       }
-
-      // Muxed formats fallback
-      const urlFormats = (info.urlFormats ?? []).filter((f: any) => f.url);
-      if (urlFormats.length > 0) {
-        return { url: urlFormats[0].url, headers };
-      }
-
       throw new Error('No audio format available for ' + contentId);
     },
 
     async getDownloadUrl(contentId: string): Promise<DownloadInfo> {
-      // Use ANDROID client for downloads — more compatible with parallel range requests
-      const info = await yt.getVideoInfo(contentId, 'ANDROID');
-      if (!info) throw new Error('Failed to get video info for ' + contentId);
+      // Do not use the stream cache here: every retry needs a freshly-signed
+      // URL while the native downloader keeps the existing .part bytes.
+      try {
+        // Current Android responses are SABR-only and expose no direct format
+        // URLs. The iOS client still returns AAC URLs and supports HTTP Range.
+        const info = await getOfficialVideoInfo(contentId, 'IOS', false);
+        const format = selectAudioFormat(info);
+        if (format?.url) {
+          return {
+            url: format.url,
+            contentLength: format.content_length ?? 0,
+            headers: { 'User-Agent': IOS_USER_AGENT },
+          };
+        }
+      } catch (error) {
+        host.log('YouTube.js download lookup failed, using adapter fallback:', error);
+      }
 
-      const audioFormats = (info.adaptiveFormats ?? [])
-        .filter((f: any) => f.url && f.mimeType?.startsWith('audio/'))
+      const fallbackInfo = await yt.getVideoInfo(contentId, 'IOS');
+      if (!fallbackInfo) throw new Error('Failed to get video info for ' + contentId);
+      const fallbackFormats = (fallbackInfo.adaptiveFormats ?? [])
+        .filter((format: any) => format.url && format.mimeType?.startsWith('audio/mp4'))
         .sort((a: any, b: any) => parseInt(b.bitrate || '0') - parseInt(a.bitrate || '0'));
-
-      if (audioFormats.length > 0) {
+      if (fallbackFormats[0]?.url) {
         return {
-          url: audioFormats[0].url!,
-          contentLength: parseInt(audioFormats[0].contentLength || '0'),
-          headers: { 'User-Agent': 'com.google.android.youtube/19.29.37 (Linux; U; Android 14) gzip' },
+          url: fallbackFormats[0].url,
+          contentLength: parseInt(fallbackFormats[0].contentLength || '0'),
+          headers: { 'User-Agent': IOS_USER_AGENT },
         };
       }
       throw new Error('No audio format available for download');
