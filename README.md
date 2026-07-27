@@ -8,15 +8,12 @@ YouTube Music source plugin for the Minip music player.
 ├── package.json          # Project metadata & scripts
 ├── tsconfig.json         # TypeScript configuration
 ├── manifest.json         # Source metadata for the app
-├── types/                # SDK type definitions
-│   ├── index.ts          # Barrel exports
-│   ├── host.ts           # SourceHost interface
-│   ├── source.ts         # MediaSource interface
-│   └── media.ts          # Track, playback, feed types
 ├── src/
-│   └── index.ts          # Source implementation
+│   ├── index.ts          # Source implementation
+│   ├── types/            # SDK type definitions
+│   └── ytbapi/           # Lightweight browse/search adapter
 ├── scripts/
-│   └── build.ts          # esbuild bundler script
+│   └── smoke-test.mjs    # Live bundle/media/range test
 └── dist/                 # Build output (gitignored)
     └── youtube.bundle.js
 ```
@@ -41,15 +38,22 @@ npm run typecheck
 ```bash
 # Single build (minified)
 npm run build
+```
 
-# Watch mode (with sourcemaps)
-npm run build:watch
+### Live smoke test
+
+```bash
+npm run test:smoke
 ```
 
 ### Output
 
 The build produces `dist/youtube.bundle.js` — a single standalone JavaScript
-file that includes all dependencies (youtubei.js is bundled inline).
+file that includes all dependencies (YouTube.js is bundled inline).
+
+The smoke test builds that exact bundle, resolves a known video's download and
+stream metadata, verifies a non-zero HTTP range request for resume support, and
+checks search output.
 
 ## Deployment
 
@@ -73,27 +77,35 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
 **Key constraints:**
 - No `@/` imports — the bundle is sandboxed
 - All native capabilities come through `SourceHost`
-- The `types/` directory serves as the SDK contract
+- The `src/types/` directory serves as the SDK contract
 
 ## Creating Your Own Source
 
-Use the `types/` directory as your SDK:
+Use the `src/types/` directory as your SDK:
 
 ```typescript
-import type { SourceHost, MediaSource, MediaTrack } from './types';
+import type { SourceHost, MediaSource } from './src/types';
 
 export default function createMySource(host: SourceHost): MediaSource {
   return {
     id: 'my-source',
     name: 'My Source',
     version: '1.0.0',
-    capabilities: { audio: true, video: false, search: true, feed: false, suggestions: false, playlists: false },
+    capabilities: {
+      audio: true,
+      video: false,
+      search: true,
+      feed: false,
+      suggestions: false,
+      playlists: false,
+      movies: false,
+      subtitles: false,
+    },
     async initialize() { /* setup */ },
     async dispose() { /* cleanup */ },
-    async getAudioUrl(contentId) { /* resolve audio URL */ },
-    async getDirectAudioUrl(contentId) { /* direct audio URL */ },
-    async getDownloadInfo(contentId) { /* download URL + size */ },
-    async search(query) { /* return MediaTrack[] */ },
+    async getStreamUrl(contentId) { /* resolve a playback URL */ },
+    async getDownloadUrl(contentId) { /* direct download URL + size */ },
+    async search(query) { /* return MediaItem[] */ },
   };
 }
 ```

@@ -1,16 +1,19 @@
 {
   "name": "@minip/source-youtube",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "YouTube Music source plugin for Minip",
   "private": true,
   "main": "dist/youtube.bundle.js",
   "types": "src/types/index.ts",
   "scripts": {
     "build": "npx rimraf dist && npx rollup -c rollup.config.mjs",
+    "test:smoke": "npm run build && node scripts/smoke-test.mjs",
     "typecheck": "tsc --noEmit",
     "clean": "rimraf dist"
   },
-  "dependencies": {},
+  "dependencies": {
+    "youtubei.js": "^17.2.0"
+  },
   "devDependencies": {
     "@babel/core": "^7.28.0",
     "@babel/plugin-syntax-import-attributes": "^7.28.6",

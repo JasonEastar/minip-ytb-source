@@ -51,7 +51,7 @@ export const CLIENTS: Record<string, ClientConfig> = {
   },
   WEB: {
     NAME: 'WEB',
-    VERSION: '2.20250222.10.00',
+    VERSION: '2.20260623.01.00',
     API_KEY: 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8',
     API_VERSION: 'v1',
     STATIC_VISITOR_ID: '6zpwvWUNAco',
@@ -59,12 +59,12 @@ export const CLIENTS: Record<string, ClientConfig> = {
   },
   MWEB: {
     NAME: 'MWEB',
-    VERSION: '2.20250224.01.00',
+    VERSION: '2.20260205.04.01',
     API_VERSION: 'v1',
   },
   WEB_KIDS: {
     NAME: 'WEB_KIDS',
-    VERSION: '2.20250221.11.00',
+    VERSION: '2.20260205.00.00',
     API_VERSION: 'v1',
   },
   YTMUSIC: {
@@ -74,9 +74,9 @@ export const CLIENTS: Record<string, ClientConfig> = {
   },
   ANDROID: {
     NAME: 'ANDROID',
-    VERSION: '19.35.36',
-    SDK_VERSION: 33,
-    USER_AGENT: 'com.google.android.youtube/19.35.36(Linux; U; Android 13; en_US; SM-S908E Build/TP1A.220624.014) gzip',
+    VERSION: '21.03.36',
+    SDK_VERSION: 36,
+    USER_AGENT: 'com.google.android.youtube/21.03.36(Linux; U; Android 16; en_US; SM-S908E Build/TP1A.220624.014) gzip',
     API_VERSION: 'v1',
   },
   YTSTUDIO_ANDROID: {
@@ -91,7 +91,7 @@ export const CLIENTS: Record<string, ClientConfig> = {
   },
   TV: {
     NAME: 'TVHTML5',
-    VERSION: '7.20250219.14.00',
+    VERSION: '7.20260311.12.00',
     USER_AGENT: 'Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version',
     API_VERSION: 'v1',
   },
@@ -107,7 +107,7 @@ export const CLIENTS: Record<string, ClientConfig> = {
   },
   WEB_EMBEDDED: {
     NAME: 'WEB_EMBEDDED_PLAYER',
-    VERSION: '1.20250219.01.00',
+    VERSION: '1.20260206.01.00',
     API_KEY: 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8',
     API_VERSION: 'v1',
     STATIC_VISITOR_ID: '6zpwvWUNAco',
