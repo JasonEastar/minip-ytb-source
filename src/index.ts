@@ -33,8 +33,7 @@ const VIDEO_INFO_CACHE_MS = 4 * 60 * 1000;
 const IOS_USER_AGENT =
   'com.google.ios.youtube/20.11.6 (iPhone10,4; U; CPU iOS 16_7_7 like Mac OS X)';
 type OfficialVideoInfo = Awaited<ReturnType<Innertube['getBasicInfo']>>;
-type OfficialFormat =
-  NonNullable<OfficialVideoInfo['streaming_data']>['adaptive_formats'][number];
+type OfficialFormat = NonNullable<OfficialVideoInfo['streaming_data']>['adaptive_formats'][number];
 
 // ─── Factory ────────────────────────────────────────────────────
 
@@ -70,7 +69,7 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
   async function getOfficialVideoInfo(
     contentId: string,
     client: 'IOS' | 'ANDROID',
-    useCache: boolean,
+    useCache: boolean
   ): Promise<OfficialVideoInfo> {
     if (!mediaYt) {
       throw new Error('YouTube.js media client is unavailable');
@@ -160,19 +159,19 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
         const info = await getOfficialVideoInfo(contentId, 'IOS', true);
         const headers = { 'User-Agent': IOS_USER_AGENT };
 
+        const format = selectAudioFormat(info);
+        if (format?.url) {
+          host.log('Using YouTube.js direct audio for', contentId, `(${format.mime_type})`);
+          return { url: format.url, headers };
+        }
+
         if (host.platform === 'ios' && info.streaming_data?.hls_manifest_url) {
-          host.log('Using YouTube.js HLS for', contentId);
+          host.log('Using YouTube.js HLS fallback for', contentId);
           return {
             url: info.streaming_data.hls_manifest_url,
             headers,
             isHLS: true,
           };
-        }
-
-        const format = selectAudioFormat(info);
-        if (format?.url) {
-          host.log('Using YouTube.js direct audio for', contentId, `(${format.mime_type})`);
-          return { url: format.url, headers };
         }
       } catch (error) {
         host.log('YouTube.js stream lookup failed, using adapter fallback:', error);
@@ -182,19 +181,19 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
       if (!fallbackInfo) throw new Error('Failed to get video info for ' + contentId);
       const fallbackHeaders = { 'User-Agent': IOS_USER_AGENT };
 
+      const fallbackFormats = (fallbackInfo.adaptiveFormats ?? [])
+        .filter((format: any) => format.url && format.mimeType?.startsWith('audio/'))
+        .sort((a: any, b: any) => parseInt(b.bitrate || '0') - parseInt(a.bitrate || '0'));
+      if (fallbackFormats[0]?.url) {
+        return { url: fallbackFormats[0].url, headers: fallbackHeaders };
+      }
+
       if (host.platform === 'ios' && fallbackInfo.hlsManifestUrl) {
         return {
           url: fallbackInfo.hlsManifestUrl,
           headers: fallbackHeaders,
           isHLS: true,
         };
-      }
-
-      const fallbackFormats = (fallbackInfo.adaptiveFormats ?? [])
-        .filter((format: any) => format.url && format.mimeType?.startsWith('audio/'))
-        .sort((a: any, b: any) => parseInt(b.bitrate || '0') - parseInt(a.bitrate || '0'));
-      if (fallbackFormats[0]?.url) {
-        return { url: fallbackFormats[0].url, headers: fallbackHeaders };
       }
       throw new Error('No audio format available for ' + contentId);
     },
@@ -241,23 +240,27 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
 
       return results.items
         .filter((v) => v.videoId)
-        .map((v): MediaItem => ({
-          id: v.videoId!,
-          sourceId: SOURCE_ID,
-          type: 'track',
-          title: v.title || 'Unknown',
-          artist: v.channelName || 'Unknown',
-          artwork: getBestThumbnail(v.thumbnails),
-          duration: parseDuration(v.lengthText),
-          contentId: v.videoId!,
-        }));
+        .map(
+          (v): MediaItem => ({
+            id: v.videoId!,
+            sourceId: SOURCE_ID,
+            type: 'track',
+            title: v.title || 'Unknown',
+            artist: v.channelName || 'Unknown',
+            artwork: getBestThumbnail(v.thumbnails),
+            duration: parseDuration(v.lengthText),
+            contentId: v.videoId!,
+          })
+        );
     },
 
     async getSearchSuggestions(query: string): Promise<string[]> {
       try {
         const suggestions = await yt.getSearchSuggestions(query);
         return suggestions.map((s) => s.text);
-      } catch { return []; }
+      } catch {
+        return [];
+      }
     },
 
     async searchGrouped(query: string): Promise<SearchResults> {
@@ -372,7 +375,8 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
 
     async getArtist(browseId: string): Promise<ArtistInfo> {
       const channel = await yt.getChannelHome(browseId);
-      if (!channel) return { id: browseId, name: 'Unknown', thumbnail: '', sections: [], sourceId: SOURCE_ID };
+      if (!channel)
+        return { id: browseId, name: 'Unknown', thumbnail: '', sections: [], sourceId: SOURCE_ID };
 
       const sections: ArtistSection[] = [];
       for (const section of channel.sections) {
@@ -430,7 +434,9 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
                 type: 'track',
                 title: item.title || 'Unknown',
                 artist: item.channelName || 'Unknown',
-                artwork: getBestThumbnail(item.thumbnails) || `https://i.ytimg.com/vi/${item.videoId}/hqdefault.jpg`,
+                artwork:
+                  getBestThumbnail(item.thumbnails) ||
+                  `https://i.ytimg.com/vi/${item.videoId}/hqdefault.jpg`,
                 duration: parseDuration(item.lengthText),
                 contentId: item.videoId,
               });
@@ -438,7 +444,9 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
           }
           if (tracks.length > 0) return tracks.slice(0, 20);
         }
-      } catch { /* fall through to search */ }
+      } catch {
+        /* fall through to search */
+      }
 
       // Strategy 2: search fallback
       try {
@@ -452,18 +460,22 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
           return sr.items
             .filter((v) => v.videoId && v.videoId !== contentId)
             .slice(0, 20)
-            .map((v): MediaItem => ({
-              id: v.videoId!,
-              sourceId: SOURCE_ID,
-              type: 'track',
-              title: v.title || 'Unknown',
-              artist: v.channelName || 'Unknown',
-              artwork: getBestThumbnail(v.thumbnails),
-              duration: parseDuration(v.lengthText),
-              contentId: v.videoId!,
-            }));
+            .map(
+              (v): MediaItem => ({
+                id: v.videoId!,
+                sourceId: SOURCE_ID,
+                type: 'track',
+                title: v.title || 'Unknown',
+                artist: v.channelName || 'Unknown',
+                artwork: getBestThumbnail(v.thumbnails),
+                duration: parseDuration(v.lengthText),
+                contentId: v.videoId!,
+              })
+            );
         }
-      } catch { /* give up */ }
+      } catch {
+        /* give up */
+      }
       return [];
     },
   };
@@ -480,7 +492,9 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
     return 0;
   }
 
-  function getBestThumbnail(thumbnails?: Array<{ url: string; width?: number; height?: number }>): string {
+  function getBestThumbnail(
+    thumbnails?: Array<{ url: string; width?: number; height?: number }>
+  ): string {
     if (!Array.isArray(thumbnails) || thumbnails.length === 0) return '';
     let url = thumbnails[thumbnails.length - 1]?.url ?? '';
     // YouTube sometimes returns protocol-relative URLs (//yt3.ggpht.com/...)

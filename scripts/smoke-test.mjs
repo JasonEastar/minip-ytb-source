@@ -72,29 +72,45 @@ try {
   });
   const bytes = new Uint8Array(await response.arrayBuffer());
   if (response.status !== 206 || bytes.length !== RANGE_LENGTH) {
-    throw new Error(
-      `Resume probe failed: HTTP ${response.status}, ${bytes.length} bytes`,
-    );
+    throw new Error(`Resume probe failed: HTTP ${response.status}, ${bytes.length} bytes`);
   }
 
-  const searchResults = await source.search(
-    'Rick Astley Never Gonna Give You Up',
-  );
+  const searchResults = await source.search('Rick Astley Never Gonna Give You Up');
   if (!searchResults.some((item) => item.contentId === VIDEO_ID)) {
     throw new Error('Search did not return the expected known video');
   }
 
   const stream = await source.getStreamUrl(VIDEO_ID);
   if (!stream.url) throw new Error('Source returned an empty stream URL');
+  const streamProbe = await fetch(stream.url, {
+    headers: {
+      ...stream.headers,
+      Range: `bytes=0-${RANGE_LENGTH - 1}`,
+    },
+  });
+  const streamBytes = new Uint8Array(await streamProbe.arrayBuffer());
+  if (!streamProbe.ok || streamBytes.length === 0) {
+    throw new Error(
+      `Playback probe failed: HTTP ${streamProbe.status}, ${streamBytes.length} bytes`
+    );
+  }
 
-  console.log(JSON.stringify({
-    bundleBytes: (await stat(new URL('../dist/youtube.bundle.js', import.meta.url))).size,
-    contentLength: download.contentLength,
-    rangeStatus: response.status,
-    contentRange: response.headers.get('content-range'),
-    searchResults: searchResults.length,
-    streamType: stream.isHLS ? 'hls' : 'direct',
-  }, null, 2));
+  console.log(
+    JSON.stringify(
+      {
+        bundleBytes: (await stat(new URL('../dist/youtube.bundle.js', import.meta.url))).size,
+        contentLength: download.contentLength,
+        rangeStatus: response.status,
+        contentRange: response.headers.get('content-range'),
+        searchResults: searchResults.length,
+        streamType: stream.isHLS ? 'hls' : 'direct',
+        streamStatus: streamProbe.status,
+        streamBytes: streamBytes.length,
+      },
+      null,
+      2
+    )
+  );
 } finally {
   await source.dispose();
 }
