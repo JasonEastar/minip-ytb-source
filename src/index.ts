@@ -31,6 +31,7 @@ import type {
 const SOURCE_ID = 'youtube';
 const VIDEO_INFO_CACHE_MS = 4 * 60 * 1000;
 const MEDIA_PROBE_TIMEOUT_MS = 10 * 1000;
+const DOWNLOAD_RANGE_HEADER = 'bytes=0-';
 const IOS_USER_AGENT =
   'com.google.ios.youtube/20.11.6 (iPhone10,4; U; CPU iOS 16_7_7 like Mac OS X)';
 const ANDROID_VR_USER_AGENT =
@@ -196,7 +197,7 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
   const source: MediaSource = {
     id: SOURCE_ID,
     name: 'YouTube Music',
-    version: '1.2.0',
+    version: '1.2.1',
     capabilities: {
       audio: true,
       video: true,
@@ -317,7 +318,10 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
         return {
           url: resolved.format.url!,
           contentLength: resolved.format.content_length ?? 0,
-          headers: resolved.headers,
+          // Google Video can reject an unbounded native request even after a
+          // ranged probe succeeds. Resume requests replace this value with
+          // their saved byte offset.
+          headers: { ...resolved.headers, Range: DOWNLOAD_RANGE_HEADER },
         };
       } catch (error) {
         officialError = error;
@@ -332,7 +336,10 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
       for (const format of fallbackFormats) {
         const url = format.url;
         if (!url) continue;
-        const headers = { 'User-Agent': IOS_USER_AGENT };
+        const headers = {
+          'User-Agent': IOS_USER_AGENT,
+          Range: DOWNLOAD_RANGE_HEADER,
+        };
         const probe = await probeMediaUrl(url, headers, true);
         if (probe.ok) {
           return {

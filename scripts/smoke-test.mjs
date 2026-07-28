@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const VIDEO_ID = 'dQw4w9WgXcQ';
-const REPORTED_VIDEO_ID = 'DCANiJsostQ';
+const REPORTED_VIDEO_IDS = ['DCANiJsostQ', 'H6VwXiasdqY'];
 const RANGE_START = 128 * 1024;
 const RANGE_LENGTH = 1024;
 
@@ -96,34 +96,63 @@ try {
     );
   }
 
-  // Regression coverage for the mobile 403 report. Resolve both paths
+  // Regression coverage for both mobile 403 reports. Resolve both paths
   // independently so each receives a fresh, verified media URL.
-  const reportedDownload = await source.getDownloadUrl(REPORTED_VIDEO_ID);
-  const reportedDownloadProbe = await fetch(reportedDownload.url, {
-    headers: {
-      ...reportedDownload.headers,
-      Range: `bytes=0-${RANGE_LENGTH - 1}`,
-    },
-  });
-  const reportedDownloadBytes = new Uint8Array(await reportedDownloadProbe.arrayBuffer());
-  if (reportedDownloadProbe.status !== 206 || reportedDownloadBytes.length !== RANGE_LENGTH) {
-    throw new Error(
-      `Reported download regression: HTTP ${reportedDownloadProbe.status}, ${reportedDownloadBytes.length} bytes`
-    );
-  }
+  const reportedResults = [];
+  for (const reportedVideoId of REPORTED_VIDEO_IDS) {
+    const reportedDownload = await source.getDownloadUrl(reportedVideoId);
+    if (reportedDownload.headers?.Range !== 'bytes=0-') {
+      throw new Error(`Download ${reportedVideoId} did not request an initial byte range`);
+    }
 
-  const reportedStream = await source.getStreamUrl(REPORTED_VIDEO_ID);
-  const reportedStreamProbe = await fetch(reportedStream.url, {
-    headers: {
-      ...reportedStream.headers,
-      Range: `bytes=0-${RANGE_LENGTH - 1}`,
-    },
-  });
-  const reportedStreamBytes = new Uint8Array(await reportedStreamProbe.arrayBuffer());
-  if (!reportedStreamProbe.ok || reportedStreamBytes.length === 0) {
-    throw new Error(
-      `Reported playback regression: HTTP ${reportedStreamProbe.status}, ${reportedStreamBytes.length} bytes`
-    );
+    // Use the source headers unchanged first: this is the request shape used
+    // by a fresh native download.
+    const openRangeProbe = await fetch(reportedDownload.url, {
+      headers: reportedDownload.headers,
+    });
+    if (openRangeProbe.status !== 206) {
+      throw new Error(
+        `Reported open-range regression: HTTP ${openRangeProbe.status} for ${reportedVideoId}`
+      );
+    }
+    await openRangeProbe.body?.cancel();
+
+    const reportedDownloadProbe = await fetch(reportedDownload.url, {
+      headers: {
+        ...reportedDownload.headers,
+        Range: `bytes=0-${RANGE_LENGTH - 1}`,
+      },
+    });
+    const reportedDownloadBytes = new Uint8Array(await reportedDownloadProbe.arrayBuffer());
+    if (reportedDownloadProbe.status !== 206 || reportedDownloadBytes.length !== RANGE_LENGTH) {
+      throw new Error(
+        `Reported download regression: HTTP ${reportedDownloadProbe.status}, ${reportedDownloadBytes.length} bytes`
+      );
+    }
+
+    const reportedStream = await source.getStreamUrl(reportedVideoId);
+    const reportedStreamProbe = await fetch(reportedStream.url, {
+      headers: {
+        ...reportedStream.headers,
+        Range: `bytes=0-${RANGE_LENGTH - 1}`,
+      },
+    });
+    const reportedStreamBytes = new Uint8Array(await reportedStreamProbe.arrayBuffer());
+    if (!reportedStreamProbe.ok || reportedStreamBytes.length === 0) {
+      throw new Error(
+        `Reported playback regression: HTTP ${reportedStreamProbe.status}, ${reportedStreamBytes.length} bytes`
+      );
+    }
+
+    reportedResults.push({
+      videoId: reportedVideoId,
+      openRangeStatus: openRangeProbe.status,
+      downloadStatus: reportedDownloadProbe.status,
+      downloadBytes: reportedDownloadBytes.length,
+      streamType: reportedStream.isHLS ? 'hls' : 'direct',
+      streamStatus: reportedStreamProbe.status,
+      streamBytes: reportedStreamBytes.length,
+    });
   }
 
   console.log(
@@ -137,11 +166,7 @@ try {
         streamType: stream.isHLS ? 'hls' : 'direct',
         streamStatus: streamProbe.status,
         streamBytes: streamBytes.length,
-        reportedDownloadStatus: reportedDownloadProbe.status,
-        reportedDownloadBytes: reportedDownloadBytes.length,
-        reportedStreamType: reportedStream.isHLS ? 'hls' : 'direct',
-        reportedStreamStatus: reportedStreamProbe.status,
-        reportedStreamBytes: reportedStreamBytes.length,
+        reportedResults,
       },
       null,
       2
