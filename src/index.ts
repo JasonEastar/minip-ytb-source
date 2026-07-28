@@ -30,10 +30,25 @@ import type {
 
 const SOURCE_ID = 'youtube';
 const VIDEO_INFO_CACHE_MS = 4 * 60 * 1000;
+const MEDIA_PROBE_TIMEOUT_MS = 10 * 1000;
 const IOS_USER_AGENT =
   'com.google.ios.youtube/20.11.6 (iPhone10,4; U; CPU iOS 16_7_7 like Mac OS X)';
+const ANDROID_VR_USER_AGENT =
+  'com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip';
+type MediaClient = 'ANDROID_VR' | 'IOS';
 type OfficialVideoInfo = Awaited<ReturnType<Innertube['getBasicInfo']>>;
 type OfficialFormat = NonNullable<OfficialVideoInfo['streaming_data']>['adaptive_formats'][number];
+type VerifiedDirectAudio = {
+  client: MediaClient;
+  format: OfficialFormat;
+  headers: Record<string, string>;
+};
+
+const MEDIA_CLIENTS: readonly MediaClient[] = ['ANDROID_VR', 'IOS'];
+const MEDIA_USER_AGENTS: Record<MediaClient, string> = {
+  ANDROID_VR: ANDROID_VR_USER_AGENT,
+  IOS: IOS_USER_AGENT,
+};
 
 // ─── Factory ────────────────────────────────────────────────────
 
@@ -45,11 +60,14 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
 
   type VideoInfoCache = { contentId: string; info: any; cachedAt: number };
   let _videoInfoCache: VideoInfoCache | null = null;
-  let _officialVideoInfoCache: {
-    contentId: string;
-    info: OfficialVideoInfo;
-    cachedAt: number;
-  } | null = null;
+  const _officialVideoInfoCache = new Map<
+    MediaClient,
+    {
+      contentId: string;
+      info: OfficialVideoInfo;
+      cachedAt: number;
+    }
+  >();
 
   async function getCachedVideoInfo(contentId: string): Promise<any> {
     if (
@@ -68,30 +86,30 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
 
   async function getOfficialVideoInfo(
     contentId: string,
-    client: 'IOS' | 'ANDROID',
+    client: MediaClient,
     useCache: boolean
   ): Promise<OfficialVideoInfo> {
     if (!mediaYt) {
       throw new Error('YouTube.js media client is unavailable');
     }
+    const cached = _officialVideoInfoCache.get(client);
     if (
       useCache &&
-      client === 'IOS' &&
-      _officialVideoInfoCache?.contentId === contentId &&
-      Date.now() - _officialVideoInfoCache.cachedAt < VIDEO_INFO_CACHE_MS
+      cached?.contentId === contentId &&
+      Date.now() - cached.cachedAt < VIDEO_INFO_CACHE_MS
     ) {
-      return _officialVideoInfoCache.info;
+      return cached.info;
     }
 
     const info = await mediaYt.getBasicInfo(contentId, { client });
-    if (useCache && client === 'IOS') {
-      _officialVideoInfoCache = { contentId, info, cachedAt: Date.now() };
+    if (useCache) {
+      _officialVideoInfoCache.set(client, { contentId, info, cachedAt: Date.now() });
     }
     return info;
   }
 
-  function selectAudioFormat(info: OfficialVideoInfo): OfficialFormat | undefined {
-    const formats = (info.streaming_data?.adaptive_formats ?? [])
+  function selectAudioFormats(info: OfficialVideoInfo): OfficialFormat[] {
+    return (info.streaming_data?.adaptive_formats ?? [])
       .filter((format) => format.has_audio && !format.has_video && Boolean(format.url))
       .sort((a, b) => {
         // Cache files use an m4a extension, so prefer AAC/MP4 over Opus/WebM.
@@ -100,7 +118,77 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
         if (aIsMp4 !== bIsMp4) return bIsMp4 - aIsMp4;
         return (b.bitrate || 0) - (a.bitrate || 0);
       });
-    return formats[0];
+  }
+
+  function errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  async function probeMediaUrl(
+    url: string,
+    headers: Record<string, string>,
+    useRange: boolean
+  ): Promise<{ ok: boolean; status?: number; error?: string }> {
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timeout = setTimeout(() => controller?.abort(), MEDIA_PROBE_TIMEOUT_MS);
+
+    try {
+      const response = await host.fetch(url, {
+        headers: {
+          ...headers,
+          ...(useRange ? { Range: 'bytes=0-0' } : {}),
+        },
+        ...(controller ? { signal: controller.signal } : {}),
+      });
+      return {
+        ok: response.status === 200 || response.status === 206,
+        status: response.status,
+      };
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async function resolveVerifiedDirectAudio(
+    contentId: string,
+    useCache: boolean
+  ): Promise<VerifiedDirectAudio> {
+    const failures: string[] = [];
+
+    // Android VR currently exposes regular HTTPS formats without requiring a
+    // GVS Proof-of-Origin token. iOS is retained as a fallback because client
+    // enforcement varies by video and network.
+    for (const client of MEDIA_CLIENTS) {
+      try {
+        const info = await getOfficialVideoInfo(contentId, client, useCache);
+        const formats = selectAudioFormats(info);
+        if (formats.length === 0) {
+          const reason =
+            info.playability_status?.reason || info.playability_status?.status || 'no direct audio';
+          failures.push(`${client}: ${reason}`);
+          continue;
+        }
+
+        const headers = { 'User-Agent': MEDIA_USER_AGENTS[client] };
+        for (const format of formats) {
+          if (!format.url) continue;
+          const probe = await probeMediaUrl(format.url, headers, true);
+          if (probe.ok) return { client, format, headers };
+
+          failures.push(
+            `${client} itag ${format.itag}: ${
+              probe.status ? `HTTP ${probe.status}` : probe.error || 'request failed'
+            }`
+          );
+        }
+      } catch (error) {
+        failures.push(`${client}: ${errorMessage(error)}`);
+      }
+    }
+
+    throw new Error(`No verified direct audio URL (${failures.join('; ')})`);
   }
 
   // ── Source Implementation ───────────────────────────────────
@@ -108,7 +196,7 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
   const source: MediaSource = {
     id: SOURCE_ID,
     name: 'YouTube Music',
-    version: '1.1.0',
+    version: '1.2.0',
     capabilities: {
       audio: true,
       video: true,
@@ -129,11 +217,16 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
         mediaYt = await Innertube.create({
           // A WEB base session keeps generic endpoints (notably search)
           // compatible with YouTube.js' parser. Media requests explicitly
-          // override this with IOS/ANDROID below to obtain direct URLs.
+          // override this with IOS/ANDROID_VR below to obtain direct URLs.
           client_type: ClientType.WEB,
-          enable_session_cache: true,
+          // Never revive locally generated visitor data from an older source
+          // version; each source lifecycle starts with server-issued data.
+          enable_session_cache: false,
           fail_fast: false,
-          generate_session_locally: true,
+          // Fetch YouTube's current visitor/session data. Locally generated
+          // visitor IDs are intermittently challenged by Android VR, which
+          // removes its otherwise token-free direct formats.
+          generate_session_locally: false,
           retrieve_innertube_config: false,
           retrieve_player: false,
           fetch: host.fetch,
@@ -149,32 +242,41 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
     async dispose(): Promise<void> {
       yt.invalidateSession();
       mediaYt = null;
-      _officialVideoInfoCache = null;
+      _officialVideoInfoCache.clear();
     },
 
     // ── Playback ──────────────────────────────────────────────
 
     async getStreamUrl(contentId: string): Promise<AudioPlaybackInfo> {
       try {
+        const resolved = await resolveVerifiedDirectAudio(contentId, true);
+        host.log(
+          `Using verified ${resolved.client} direct audio for`,
+          contentId,
+          `(${resolved.format.mime_type})`
+        );
+        return { url: resolved.format.url!, headers: resolved.headers };
+      } catch (error) {
+        host.log('YouTube.js direct stream lookup failed:', error);
+      }
+
+      try {
         const info = await getOfficialVideoInfo(contentId, 'IOS', true);
         const headers = { 'User-Agent': IOS_USER_AGENT };
-
-        const format = selectAudioFormat(info);
-        if (format?.url) {
-          host.log('Using YouTube.js direct audio for', contentId, `(${format.mime_type})`);
-          return { url: format.url, headers };
-        }
-
         if (host.platform === 'ios' && info.streaming_data?.hls_manifest_url) {
-          host.log('Using YouTube.js HLS fallback for', contentId);
-          return {
-            url: info.streaming_data.hls_manifest_url,
-            headers,
-            isHLS: true,
-          };
+          const probe = await probeMediaUrl(info.streaming_data.hls_manifest_url, headers, false);
+          if (probe.ok) {
+            host.log('Using verified YouTube.js HLS fallback for', contentId);
+            return {
+              url: info.streaming_data.hls_manifest_url,
+              headers,
+              isHLS: true,
+            };
+          }
+          host.log(`YouTube.js HLS probe failed: HTTP ${probe.status || 'network error'}`);
         }
       } catch (error) {
-        host.log('YouTube.js stream lookup failed, using adapter fallback:', error);
+        host.log('YouTube.js HLS lookup failed, using adapter fallback:', error);
       }
 
       const fallbackInfo = await getCachedVideoInfo(contentId);
@@ -184,36 +286,41 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
       const fallbackFormats = (fallbackInfo.adaptiveFormats ?? [])
         .filter((format: any) => format.url && format.mimeType?.startsWith('audio/'))
         .sort((a: any, b: any) => parseInt(b.bitrate || '0') - parseInt(a.bitrate || '0'));
-      if (fallbackFormats[0]?.url) {
-        return { url: fallbackFormats[0].url, headers: fallbackHeaders };
+      for (const format of fallbackFormats) {
+        const probe = await probeMediaUrl(format.url, fallbackHeaders, true);
+        if (probe.ok) {
+          host.log('Using verified adapter direct audio for', contentId);
+          return { url: format.url, headers: fallbackHeaders };
+        }
       }
 
       if (host.platform === 'ios' && fallbackInfo.hlsManifestUrl) {
-        return {
-          url: fallbackInfo.hlsManifestUrl,
-          headers: fallbackHeaders,
-          isHLS: true,
-        };
+        const probe = await probeMediaUrl(fallbackInfo.hlsManifestUrl, fallbackHeaders, false);
+        if (probe.ok) {
+          return {
+            url: fallbackInfo.hlsManifestUrl,
+            headers: fallbackHeaders,
+            isHLS: true,
+          };
+        }
       }
-      throw new Error('No audio format available for ' + contentId);
+      throw new Error(`YouTube blocked every playback URL for ${contentId}`);
     },
 
     async getDownloadUrl(contentId: string): Promise<DownloadInfo> {
       // Do not use the stream cache here: every retry needs a freshly-signed
       // URL while the native downloader keeps the existing .part bytes.
+      let officialError: unknown;
       try {
-        // Current Android responses are SABR-only and expose no direct format
-        // URLs. The iOS client still returns AAC URLs and supports HTTP Range.
-        const info = await getOfficialVideoInfo(contentId, 'IOS', false);
-        const format = selectAudioFormat(info);
-        if (format?.url) {
-          return {
-            url: format.url,
-            contentLength: format.content_length ?? 0,
-            headers: { 'User-Agent': IOS_USER_AGENT },
-          };
-        }
+        const resolved = await resolveVerifiedDirectAudio(contentId, false);
+        host.log(`Using verified ${resolved.client} download URL for`, contentId);
+        return {
+          url: resolved.format.url!,
+          contentLength: resolved.format.content_length ?? 0,
+          headers: resolved.headers,
+        };
       } catch (error) {
+        officialError = error;
         host.log('YouTube.js download lookup failed, using adapter fallback:', error);
       }
 
@@ -222,14 +329,24 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
       const fallbackFormats = (fallbackInfo.adaptiveFormats ?? [])
         .filter((format: any) => format.url && format.mimeType?.startsWith('audio/mp4'))
         .sort((a: any, b: any) => parseInt(b.bitrate || '0') - parseInt(a.bitrate || '0'));
-      if (fallbackFormats[0]?.url) {
-        return {
-          url: fallbackFormats[0].url,
-          contentLength: parseInt(fallbackFormats[0].contentLength || '0'),
-          headers: { 'User-Agent': IOS_USER_AGENT },
-        };
+      for (const format of fallbackFormats) {
+        const url = format.url;
+        if (!url) continue;
+        const headers = { 'User-Agent': IOS_USER_AGENT };
+        const probe = await probeMediaUrl(url, headers, true);
+        if (probe.ok) {
+          return {
+            url,
+            contentLength: parseInt(format.contentLength || '0'),
+            headers,
+          };
+        }
       }
-      throw new Error('No audio format available for download');
+      throw new Error(
+        `YouTube blocked every download URL: ${errorMessage(
+          officialError || 'no direct audio format'
+        )}`
+      );
     },
 
     // ── Search ────────────────────────────────────────────────
