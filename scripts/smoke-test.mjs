@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const VIDEO_ID = 'dQw4w9WgXcQ';
-const REPORTED_VIDEO_IDS = ['DCANiJsostQ', 'H6VwXiasdqY'];
+const REPORTED_VIDEO_IDS = ['DCANiJsostQ', 'H6VwXiasdqY', 'kZpXTYzp3F0'];
 const RANGE_START = 128 * 1024;
 const RANGE_LENGTH = 1024;
 
