@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const VIDEO_ID = 'dQw4w9WgXcQ';
-const REPORTED_VIDEO_IDS = ['DCANiJsostQ', 'H6VwXiasdqY', 'kZpXTYzp3F0'];
+const REPORTED_VIDEO_IDS = ['DCANiJsostQ', 'H6VwXiasdqY', 'kZpXTYzp3F0', 'mwHnDQQ-nMg'];
 const RANGE_START = 128 * 1024;
 const RANGE_LENGTH = 1024;
 
@@ -36,9 +36,28 @@ if (typeof factory !== 'function') {
 }
 
 const sourceStorage = new Map();
+let sawAndroidVrUserAgent = false;
+let sawIosUserAgent = false;
+const sourceFetch = async (input, init) => {
+  if (typeof init?.body === 'string') {
+    try {
+      const payload = JSON.parse(init.body);
+      const clientName = payload?.context?.client?.clientName;
+      const userAgent = new Headers(init.headers).get('User-Agent') || '';
+      if (clientName === 'ANDROID_VR') {
+        sawAndroidVrUserAgent = userAgent.includes('youtube.vr.oculus');
+      } else if (clientName === 'iOS') {
+        sawIosUserAgent = userAgent.includes('com.google.ios.youtube');
+      }
+    } catch {
+      // Ignore non-JSON requests.
+    }
+  }
+  return globalThis.fetch(input, init);
+};
 const source = factory({
   platform: 'ios',
-  fetch: globalThis.fetch.bind(globalThis),
+  fetch: sourceFetch,
   fileExists: () => false,
   readFile: () => '',
   writeFile: () => {},
@@ -94,6 +113,11 @@ try {
   if (!streamProbe.ok || streamBytes.length === 0) {
     throw new Error(
       `Playback probe failed: HTTP ${streamProbe.status}, ${streamBytes.length} bytes`
+    );
+  }
+  if (!sawAndroidVrUserAgent || !sawIosUserAgent) {
+    throw new Error(
+      `Media client User-Agent mismatch: IOS=${sawIosUserAgent}, ANDROID_VR=${sawAndroidVrUserAgent}`
     );
   }
 
@@ -209,6 +233,10 @@ try {
         streamType: stream.isHLS ? 'hls' : 'direct',
         streamStatus: streamProbe.status,
         streamBytes: streamBytes.length,
+        mediaClientHeaders: {
+          ios: sawIosUserAgent,
+          androidVr: sawAndroidVrUserAgent,
+        },
         reportedResults,
       },
       null,

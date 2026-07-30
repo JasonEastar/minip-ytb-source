@@ -115,6 +115,30 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
     return info;
   }
 
+  const mediaFetch: typeof globalThis.fetch = async (input, init) => {
+    let headers = init?.headers;
+    if (typeof init?.body === 'string') {
+      try {
+        const payload = JSON.parse(init.body);
+        const clientName = payload?.context?.client?.clientName;
+        const userAgent =
+          clientName === 'ANDROID_VR'
+            ? ANDROID_VR_USER_AGENT
+            : clientName === 'iOS'
+              ? IOS_USER_AGENT
+              : undefined;
+        if (userAgent) {
+          const adjustedHeaders = new Headers(headers);
+          adjustedHeaders.set('User-Agent', userAgent);
+          headers = adjustedHeaders;
+        }
+      } catch {
+        // Non-JSON requests pass through unchanged.
+      }
+    }
+    return host.fetch(input, { ...init, headers });
+  };
+
   function selectAudioFormats(info: OfficialVideoInfo): OfficialFormat[] {
     return (info.streaming_data?.adaptive_formats ?? [])
       .filter((format) => format.has_audio && !format.has_video && Boolean(format.url))
@@ -352,7 +376,7 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
   const source: MediaSource = {
     id: SOURCE_ID,
     name: 'YouTube Music',
-    version: '1.3.0',
+    version: '1.3.1',
     capabilities: {
       audio: true,
       video: true,
@@ -385,7 +409,11 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
           generate_session_locally: false,
           retrieve_innertube_config: false,
           retrieve_player: false,
-          fetch: host.fetch,
+          // YouTube.js 17.2 does not override the HTTP User-Agent when a
+          // request selects ANDROID_VR, even though its JSON context does.
+          // Keep the transport header aligned with both media client profiles;
+          // YouTube can otherwise suppress or reject their playback formats.
+          fetch: mediaFetch,
         });
       } catch (error) {
         // Browse/search can still operate through the lightweight adapter. The
