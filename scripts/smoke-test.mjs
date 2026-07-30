@@ -3,7 +3,13 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const VIDEO_ID = 'dQw4w9WgXcQ';
-const REPORTED_VIDEO_IDS = ['DCANiJsostQ', 'H6VwXiasdqY', 'kZpXTYzp3F0', 'mwHnDQQ-nMg'];
+const REPORTED_VIDEO_IDS = [
+  'DCANiJsostQ',
+  'H6VwXiasdqY',
+  'kZpXTYzp3F0',
+  'mwHnDQQ-nMg',
+  'O1lY_6et8W0',
+];
 const RANGE_START = 128 * 1024;
 const RANGE_LENGTH = 1024;
 
@@ -38,6 +44,7 @@ if (typeof factory !== 'function') {
 const sourceStorage = new Map();
 let sawAndroidVrUserAgent = false;
 let sawIosUserAgent = false;
+let forcedIndexedHlsRetry = false;
 const sourceFetch = async (input, init) => {
   if (typeof init?.body === 'string') {
     try {
@@ -53,6 +60,17 @@ const sourceFetch = async (input, init) => {
       // Ignore non-JSON requests.
     }
   }
+
+  // Deterministically exercise the fresh-URL retry used when Google issues a
+  // sequential-only media URL. Start/index probes still succeed; the first
+  // far one-byte qualification probe receives the 403 seen in production.
+  const range = new Headers(init?.headers).get('Range');
+  const oneByteRange = range?.match(/^bytes=(\d+)-\1$/);
+  if (!forcedIndexedHlsRetry && oneByteRange && Number(oneByteRange[1]) > 1024 * 1024) {
+    forcedIndexedHlsRetry = true;
+    return new Response(null, { status: 403 });
+  }
+
   return globalThis.fetch(input, init);
 };
 const source = factory({
@@ -120,7 +138,6 @@ try {
       `Media client User-Agent mismatch: IOS=${sawIosUserAgent}, ANDROID_VR=${sawAndroidVrUserAgent}`
     );
   }
-
   // Regression coverage for both mobile 403 reports. Resolve both paths
   // independently so each receives a fresh, verified media URL.
   const reportedResults = [];
@@ -220,6 +237,10 @@ try {
       streamBytes: reportedStreamBytes.length,
       indexedHlsSegmentBytes,
     });
+  }
+
+  if (!forcedIndexedHlsRetry) {
+    throw new Error('Indexed HLS fresh-URL retry was not exercised');
   }
 
   console.log(

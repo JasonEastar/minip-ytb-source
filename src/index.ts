@@ -314,10 +314,11 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
     resolved: VerifiedDirectAudio
   ): Promise<AudioPlaybackInfo | null> {
     const { format, headers } = resolved;
+    const mediaUrl = format.url;
     const initRange = format.init_range;
     const indexRange = format.index_range;
     if (
-      !format.url ||
+      !mediaUrl ||
       !format.mime_type.includes('audio/mp4') ||
       !initRange ||
       !indexRange ||
@@ -326,7 +327,7 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
       return null;
     }
 
-    const response = await host.fetch(format.url, {
+    const response = await host.fetch(mediaUrl, {
       headers: {
         ...headers,
         Range: `bytes=${indexRange.start}-${indexRange.end}`,
@@ -342,11 +343,31 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
     if (indexedSegments.length === 0) return null;
     const segments = coalesceHlsSegments(indexedSegments);
 
+    // Some freshly-issued Google Video URLs only allow early or sequential
+    // reads: their init/index ranges work, but a later AVPlayer HLS segment
+    // receives 403. Qualify the middle and tail before exposing the playlist;
+    // getStreamUrl can then request another freshly-signed URL.
+    for (const segment of [
+      segments[Math.floor(segments.length / 2)],
+      segments[segments.length - 1],
+    ]) {
+      if (!segment) return null;
+      const probe = await host.fetch(mediaUrl, {
+        headers: {
+          ...headers,
+          Range: `bytes=${segment.offset}-${segment.offset}`,
+        },
+      });
+      const ok = probe.status === 206;
+      await probe.body?.cancel();
+      if (!ok) return null;
+    }
+
     const targetDuration = Math.max(
       1,
       Math.ceil(Math.max(...segments.map((segment) => segment.durationSeconds)))
     );
-    const mediaUrl = format.url.replace(/"/g, '%22');
+    const escapedMediaUrl = mediaUrl.replace(/"/g, '%22');
     const initLength = initRange.end - initRange.start + 1;
     const manifest = [
       '#EXTM3U',
@@ -354,11 +375,11 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
       `#EXT-X-TARGETDURATION:${targetDuration}`,
       '#EXT-X-MEDIA-SEQUENCE:0',
       '#EXT-X-PLAYLIST-TYPE:VOD',
-      `#EXT-X-MAP:URI="${mediaUrl}",BYTERANGE="${initLength}@${initRange.start}"`,
+      `#EXT-X-MAP:URI="${escapedMediaUrl}",BYTERANGE="${initLength}@${initRange.start}"`,
       ...segments.flatMap((segment) => [
         `#EXTINF:${segment.durationSeconds.toFixed(6)},`,
         `#EXT-X-BYTERANGE:${segment.size}@${segment.offset}`,
-        mediaUrl,
+        escapedMediaUrl,
       ]),
       '#EXT-X-ENDLIST',
       '',
@@ -376,7 +397,7 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
   const source: MediaSource = {
     id: SOURCE_ID,
     name: 'YouTube Music',
-    version: '1.3.1',
+    version: '1.3.2',
     capabilities: {
       audio: true,
       video: true,
@@ -459,17 +480,30 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
       }
 
       try {
-        const resolved = await resolveVerifiedDirectAudio(contentId, true);
+        let resolved = await resolveVerifiedDirectAudio(contentId, true);
         if (host.platform === 'ios') {
-          try {
-            const indexedHls = await createIndexedHlsStream(contentId, resolved);
-            if (indexedHls) {
-              host.log(`Using indexed ${resolved.client} HLS stream for`, contentId);
-              return indexedHls;
+          for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+              const indexedHls = await createIndexedHlsStream(contentId, resolved);
+              if (indexedHls) {
+                host.log(`Using indexed ${resolved.client} HLS stream for`, contentId);
+                return indexedHls;
+              }
+            } catch (error) {
+              host.log('Indexed HLS qualification failed:', error);
             }
-          } catch (error) {
-            host.log('Indexed HLS creation failed, using direct audio:', error);
+
+            if (attempt < 2) {
+              try {
+                resolved = await resolveVerifiedDirectAudio(contentId, false);
+                host.log(`Retrying indexed HLS with fresh ${resolved.client} URL for`, contentId);
+              } catch (error) {
+                host.log('Fresh URL lookup failed; using the verified direct audio URL:', error);
+                break;
+              }
+            }
           }
+          host.log('Indexed HLS ranges unavailable, using direct audio for', contentId);
         }
 
         host.log(

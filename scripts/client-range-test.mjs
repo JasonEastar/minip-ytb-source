@@ -1,7 +1,21 @@
 import { ClientType, Innertube } from 'youtubei.js';
 
 const videoId = process.argv[2] || 'mwHnDQQ-nMg';
-const clients = ['IOS', 'ANDROID_VR', 'ANDROID', 'TVHTML5', 'TVHTML5_SIMPLY'];
+const clients = [
+  'IOS',
+  'ANDROID_VR',
+  'ANDROID',
+  'WEB',
+  'MWEB',
+  'YTMUSIC',
+  'YTMUSIC_ANDROID',
+  'YTSTUDIO_ANDROID',
+  'TV',
+  'TV_SIMPLY',
+  'TV_EMBEDDED',
+  'WEB_EMBEDDED',
+  'WEB_CREATOR',
+];
 const userAgents = {
   IOS: 'com.google.ios.youtube/20.11.6 (iPhone10,4; U; CPU iOS 16_7_7 like Mac OS X)',
   ANDROID_VR:
