@@ -32,6 +32,7 @@ const SOURCE_ID = 'youtube';
 const VIDEO_INFO_CACHE_MS = 4 * 60 * 1000;
 const MEDIA_PROBE_TIMEOUT_MS = 10 * 1000;
 const DOWNLOAD_RANGE_HEADER = 'bytes=0-';
+const HLS_SEGMENT_TARGET_SECONDS = 6;
 const IOS_USER_AGENT =
   'com.google.ios.youtube/20.11.6 (iPhone10,4; U; CPU iOS 16_7_7 like Mac OS X)';
 const ANDROID_VR_USER_AGENT =
@@ -43,6 +44,11 @@ type VerifiedDirectAudio = {
   client: MediaClient;
   format: OfficialFormat;
   headers: Record<string, string>;
+};
+type IndexedMediaSegment = {
+  offset: number;
+  size: number;
+  durationSeconds: number;
 };
 
 const MEDIA_CLIENTS: readonly MediaClient[] = ['ANDROID_VR', 'IOS'];
@@ -192,12 +198,161 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
     throw new Error(`No verified direct audio URL (${failures.join('; ')})`);
   }
 
+  function readUint64(view: DataView, offset: number): number {
+    return view.getUint32(offset) * 2 ** 32 + view.getUint32(offset + 4);
+  }
+
+  function parseSidxSegments(data: Uint8Array, absoluteDataOffset: number): IndexedMediaSegment[] {
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    let boxOffset = 0;
+
+    while (boxOffset + 8 <= data.byteLength) {
+      let boxSize = view.getUint32(boxOffset);
+      const boxType = String.fromCharCode(
+        data[boxOffset + 4],
+        data[boxOffset + 5],
+        data[boxOffset + 6],
+        data[boxOffset + 7]
+      );
+      let headerSize = 8;
+      if (boxSize === 1) {
+        if (boxOffset + 16 > data.byteLength) break;
+        boxSize = readUint64(view, boxOffset + 8);
+        headerSize = 16;
+      }
+      if (boxSize < headerSize || boxOffset + boxSize > data.byteLength) break;
+
+      if (boxType !== 'sidx') {
+        boxOffset += boxSize;
+        continue;
+      }
+
+      const fullBoxOffset = boxOffset + headerSize;
+      const version = data[fullBoxOffset];
+      const timescale = view.getUint32(fullBoxOffset + 8);
+      if (timescale <= 0) return [];
+
+      let cursor = fullBoxOffset + 12;
+      cursor += version === 0 ? 4 : 8; // earliest_presentation_time
+      const firstOffset = version === 0 ? view.getUint32(cursor) : readUint64(view, cursor);
+      cursor += version === 0 ? 4 : 8;
+      cursor += 2; // reserved
+      const referenceCount = view.getUint16(cursor);
+      cursor += 2;
+
+      let mediaOffset = absoluteDataOffset + boxOffset + boxSize + firstOffset;
+      const segments: IndexedMediaSegment[] = [];
+      for (let index = 0; index < referenceCount; index++) {
+        if (cursor + 12 > boxOffset + boxSize) return [];
+        const reference = view.getUint32(cursor);
+        const referenceType = reference >>> 31;
+        const size = reference & 0x7fffffff;
+        const duration = view.getUint32(cursor + 4);
+        cursor += 12;
+        if (referenceType !== 0 || size <= 0 || duration <= 0) return [];
+
+        segments.push({
+          offset: mediaOffset,
+          size,
+          durationSeconds: duration / timescale,
+        });
+        mediaOffset += size;
+      }
+      return segments;
+    }
+
+    return [];
+  }
+
+  function coalesceHlsSegments(segments: IndexedMediaSegment[]): IndexedMediaSegment[] {
+    const grouped: IndexedMediaSegment[] = [];
+    let current: IndexedMediaSegment | null = null;
+
+    for (const segment of segments) {
+      if (!current) {
+        current = { ...segment };
+      } else {
+        current.size += segment.size;
+        current.durationSeconds += segment.durationSeconds;
+      }
+
+      if (current.durationSeconds >= HLS_SEGMENT_TARGET_SECONDS) {
+        grouped.push(current);
+        current = null;
+      }
+    }
+    if (current) grouped.push(current);
+    return grouped;
+  }
+
+  async function createIndexedHlsStream(
+    contentId: string,
+    resolved: VerifiedDirectAudio
+  ): Promise<AudioPlaybackInfo | null> {
+    const { format, headers } = resolved;
+    const initRange = format.init_range;
+    const indexRange = format.index_range;
+    if (
+      !format.url ||
+      !format.mime_type.includes('audio/mp4') ||
+      !initRange ||
+      !indexRange ||
+      indexRange.end < indexRange.start
+    ) {
+      return null;
+    }
+
+    const response = await host.fetch(format.url, {
+      headers: {
+        ...headers,
+        Range: `bytes=${indexRange.start}-${indexRange.end}`,
+      },
+    });
+    if (response.status !== 206) {
+      await response.body?.cancel();
+      return null;
+    }
+
+    const indexBytes = new Uint8Array(await response.arrayBuffer());
+    const indexedSegments = parseSidxSegments(indexBytes, indexRange.start);
+    if (indexedSegments.length === 0) return null;
+    const segments = coalesceHlsSegments(indexedSegments);
+
+    const targetDuration = Math.max(
+      1,
+      Math.ceil(Math.max(...segments.map((segment) => segment.durationSeconds)))
+    );
+    const mediaUrl = format.url.replace(/"/g, '%22');
+    const initLength = initRange.end - initRange.start + 1;
+    const manifest = [
+      '#EXTM3U',
+      '#EXT-X-VERSION:7',
+      `#EXT-X-TARGETDURATION:${targetDuration}`,
+      '#EXT-X-MEDIA-SEQUENCE:0',
+      '#EXT-X-PLAYLIST-TYPE:VOD',
+      `#EXT-X-MAP:URI="${mediaUrl}",BYTERANGE="${initLength}@${initRange.start}"`,
+      ...segments.flatMap((segment) => [
+        `#EXTINF:${segment.durationSeconds.toFixed(6)},`,
+        `#EXT-X-BYTERANGE:${segment.size}@${segment.offset}`,
+        mediaUrl,
+      ]),
+      '#EXT-X-ENDLIST',
+      '',
+    ].join('\n');
+
+    return {
+      url: host.writeCacheFile(`youtube-${contentId}-${Date.now()}.m3u8`, manifest),
+      headers,
+      isHLS: true,
+    };
+  }
+
   // ── Source Implementation ───────────────────────────────────
 
   const source: MediaSource = {
     id: SOURCE_ID,
     name: 'YouTube Music',
-    version: '1.2.1',
+    version: '1.3.0',
     capabilities: {
       audio: true,
       video: true,
@@ -249,8 +404,46 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
     // ── Playback ──────────────────────────────────────────────
 
     async getStreamUrl(contentId: string): Promise<AudioPlaybackInfo> {
+      // Stream uncached iOS playback through YouTube's segmented HLS delivery.
+      // Downloads use getDownloadUrl() below and remain progressive MP4, so the
+      // player can swap to the completed local file without making AVPlayer
+      // seek through a large remote MP4.
+      if (host.platform === 'ios') {
+        try {
+          const info = await getOfficialVideoInfo(contentId, 'IOS', true);
+          const hlsUrl = info.streaming_data?.hls_manifest_url;
+          const headers = { 'User-Agent': IOS_USER_AGENT };
+          if (hlsUrl) {
+            const probe = await probeMediaUrl(hlsUrl, headers, false);
+            if (probe.ok) {
+              host.log('Using verified YouTube.js HLS stream for', contentId);
+              return {
+                url: hlsUrl,
+                headers,
+                isHLS: true,
+              };
+            }
+            host.log(`YouTube.js HLS probe failed: HTTP ${probe.status || 'network error'}`);
+          }
+        } catch (error) {
+          host.log('YouTube.js HLS lookup failed, trying direct audio:', error);
+        }
+      }
+
       try {
         const resolved = await resolveVerifiedDirectAudio(contentId, true);
+        if (host.platform === 'ios') {
+          try {
+            const indexedHls = await createIndexedHlsStream(contentId, resolved);
+            if (indexedHls) {
+              host.log(`Using indexed ${resolved.client} HLS stream for`, contentId);
+              return indexedHls;
+            }
+          } catch (error) {
+            host.log('Indexed HLS creation failed, using direct audio:', error);
+          }
+        }
+
         host.log(
           `Using verified ${resolved.client} direct audio for`,
           contentId,
@@ -261,28 +454,21 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
         host.log('YouTube.js direct stream lookup failed:', error);
       }
 
-      try {
-        const info = await getOfficialVideoInfo(contentId, 'IOS', true);
-        const headers = { 'User-Agent': IOS_USER_AGENT };
-        if (host.platform === 'ios' && info.streaming_data?.hls_manifest_url) {
-          const probe = await probeMediaUrl(info.streaming_data.hls_manifest_url, headers, false);
-          if (probe.ok) {
-            host.log('Using verified YouTube.js HLS fallback for', contentId);
-            return {
-              url: info.streaming_data.hls_manifest_url,
-              headers,
-              isHLS: true,
-            };
-          }
-          host.log(`YouTube.js HLS probe failed: HTTP ${probe.status || 'network error'}`);
-        }
-      } catch (error) {
-        host.log('YouTube.js HLS lookup failed, using adapter fallback:', error);
-      }
-
       const fallbackInfo = await getCachedVideoInfo(contentId);
       if (!fallbackInfo) throw new Error('Failed to get video info for ' + contentId);
       const fallbackHeaders = { 'User-Agent': IOS_USER_AGENT };
+
+      if (host.platform === 'ios' && fallbackInfo.hlsManifestUrl) {
+        const probe = await probeMediaUrl(fallbackInfo.hlsManifestUrl, fallbackHeaders, false);
+        if (probe.ok) {
+          host.log('Using verified adapter HLS stream for', contentId);
+          return {
+            url: fallbackInfo.hlsManifestUrl,
+            headers: fallbackHeaders,
+            isHLS: true,
+          };
+        }
+      }
 
       const fallbackFormats = (fallbackInfo.adaptiveFormats ?? [])
         .filter((format: any) => format.url && format.mimeType?.startsWith('audio/'))
@@ -292,17 +478,6 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
         if (probe.ok) {
           host.log('Using verified adapter direct audio for', contentId);
           return { url: format.url, headers: fallbackHeaders };
-        }
-      }
-
-      if (host.platform === 'ios' && fallbackInfo.hlsManifestUrl) {
-        const probe = await probeMediaUrl(fallbackInfo.hlsManifestUrl, fallbackHeaders, false);
-        if (probe.ok) {
-          return {
-            url: fallbackInfo.hlsManifestUrl,
-            headers: fallbackHeaders,
-            isHLS: true,
-          };
         }
       }
       throw new Error(`YouTube blocked every playback URL for ${contentId}`);

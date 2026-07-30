@@ -44,7 +44,8 @@ const source = factory({
   writeFile: () => {},
   ensureDirectory: () => {},
   getFileUri: (path) => path,
-  writeCacheFile: (filename) => filename,
+  writeCacheFile: (_filename, content) =>
+    `data:application/vnd.apple.mpegurl;base64,${Buffer.from(content).toString('base64')}`,
   downloadFile: async () => {},
   cancelDownload: () => {},
   onDownloadProgress: () => () => {},
@@ -144,6 +145,47 @@ try {
       );
     }
 
+    let indexedHlsSegmentBytes;
+    if (reportedStream.isHLS && reportedStream.url.startsWith('data:')) {
+      const manifest = new TextDecoder().decode(reportedStreamBytes);
+      const map = manifest.match(/#EXT-X-MAP:URI="([^"]+)",BYTERANGE="(\d+)@(\d+)"/);
+      const segment = manifest.match(/#EXT-X-BYTERANGE:(\d+)@(\d+)\n([^\n]+)/);
+      if (!map || !segment) {
+        throw new Error(`Indexed HLS manifest is malformed for ${reportedVideoId}`);
+      }
+
+      const mapLength = Number(map[2]);
+      const mapStart = Number(map[3]);
+      const mapProbe = await fetch(map[1], {
+        headers: {
+          ...reportedStream.headers,
+          Range: `bytes=${mapStart}-${mapStart + mapLength - 1}`,
+        },
+      });
+      const mapBytes = new Uint8Array(await mapProbe.arrayBuffer());
+      if (mapProbe.status !== 206 || mapBytes.length !== mapLength) {
+        throw new Error(
+          `Indexed HLS map regression: HTTP ${mapProbe.status}, ${mapBytes.length} bytes`
+        );
+      }
+
+      const segmentLength = Number(segment[1]);
+      const segmentStart = Number(segment[2]);
+      const segmentProbe = await fetch(segment[3], {
+        headers: {
+          ...reportedStream.headers,
+          Range: `bytes=${segmentStart}-${segmentStart + segmentLength - 1}`,
+        },
+      });
+      const segmentBytes = new Uint8Array(await segmentProbe.arrayBuffer());
+      if (segmentProbe.status !== 206 || segmentBytes.length !== segmentLength) {
+        throw new Error(
+          `Indexed HLS segment regression: HTTP ${segmentProbe.status}, ${segmentBytes.length} bytes`
+        );
+      }
+      indexedHlsSegmentBytes = segmentBytes.length;
+    }
+
     reportedResults.push({
       videoId: reportedVideoId,
       openRangeStatus: openRangeProbe.status,
@@ -152,6 +194,7 @@ try {
       streamType: reportedStream.isHLS ? 'hls' : 'direct',
       streamStatus: reportedStreamProbe.status,
       streamBytes: reportedStreamBytes.length,
+      indexedHlsSegmentBytes,
     });
   }
 
