@@ -904,6 +904,17 @@ export class BrowseService {
               sectionContinuation = pItem.continuationItemRenderer.continuationEndpoint.continuationCommand.token;
             }
           }
+        } else if (firstContent?.gridRenderer?.items) {
+          // Channel Playlists tabs wrap playlist lockups in a grid renderer.
+          // Flatten it so both legacy gridPlaylistRenderer items and newer
+          // lockupViewModel items reach parseRendererItem.
+          itemsSource = firstContent.gridRenderer.items;
+          for (const gridItem of itemsSource) {
+            if (gridItem?.continuationItemRenderer?.continuationEndpoint?.continuationCommand?.token) {
+              sectionContinuation =
+                gridItem.continuationItemRenderer.continuationEndpoint.continuationCommand.token;
+            }
+          }
         }
       }
 
