@@ -834,6 +834,7 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
               thumbnail: getBestThumbnail(item.thumbnails),
               type: 'playlist',
               browseId: item.playlistId,
+              itemCount: item.videoCount,
             });
           }
         }

@@ -1078,19 +1078,25 @@ export class BrowseService {
       const contentImage =
         lvm.contentImage?.collectionThumbnailViewModel?.primaryThumbnail?.thumbnailViewModel ??
         lvm.contentImage?.thumbnailViewModel;
+      const imageSources = contentImage?.image?.sources;
+      const badgeSources =
+        contentImage?.overlays?.[0]?.thumbnailOverlayBadgeViewModel?.thumbnailBadges?.[0]
+          ?.thumbnailBadgeViewModel?.icon?.sources;
       const metadata = lvm.metadata?.lockupMetadataViewModel;
       const titleText = metadata?.title?.content;
       const metadataRows = metadata?.metadata?.contentMetadataViewModel?.metadataRows;
       let channelName: string | undefined;
       let viewCount: string | undefined;
       let publishedTime: string | undefined;
+      let videoCount: string | undefined;
 
       if (metadataRows) {
         for (const row of metadataRows) {
           for (const part of row?.metadataParts ?? []) {
             const t = part?.text?.content;
             if (t) {
-              if (t.includes('views') || t.includes('watching')) viewCount = t;
+              if (/\bvideos?\b/i.test(t)) videoCount = t;
+              else if (t.includes('views') || t.includes('watching')) viewCount = t;
               else if (t.includes('ago') || t.includes('Streamed')) publishedTime = t;
               else if (!channelName) channelName = t;
             }
@@ -1102,10 +1108,10 @@ export class BrowseService {
         videoId: isVideo ? contentId : undefined,
         playlistId: !isVideo ? contentId : undefined,
         title: titleText,
-        thumbnails: contentImage?.overlays?.[0]?.thumbnailOverlayBadgeViewModel?.thumbnailBadges?.[0]?.thumbnailBadgeViewModel?.icon?.sources ??
-          contentImage?.image?.sources,
+        thumbnails: imageSources?.length ? imageSources : badgeSources,
         channelName,
         viewCount,
+        videoCount,
         publishedTimeText: publishedTime,
         lengthText: contentImage?.overlays?.find((o: any) => o?.thumbnailOverlayBadgeViewModel)?.thumbnailOverlayBadgeViewModel?.thumbnailBadges?.[0]?.thumbnailBadgeViewModel?.text,
       };

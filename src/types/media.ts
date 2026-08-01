@@ -130,6 +130,7 @@ export interface MediaFeedItem {
   type: 'playlist' | 'album' | 'song' | 'artist' | 'movie' | 'series' | 'episode' | 'category' | 'unknown';
   trackId?: string;
   browseId?: string;
+  itemCount?: string;
   backdrop?: string;
   year?: number;
   rating?: string;
@@ -189,4 +190,3 @@ export interface DownloadInfo {
   contentLength: number;
   headers?: Record<string, string>;
 }
-
