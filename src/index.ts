@@ -728,7 +728,8 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
       return {
         title: playlist.channelMeta?.title || 'Playlist',
         subtitle: '',
-        thumbnail: getBestThumbnail(playlist.channelMeta?.thumbnails),
+        thumbnail:
+          getBestThumbnail(playlist.channelMeta?.thumbnails) || items[0]?.artwork || '',
         items,
         collectionType: 'playlist',
       };
