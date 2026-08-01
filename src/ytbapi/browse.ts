@@ -740,7 +740,9 @@ export class BrowseService {
           continuationToken = item.continuationItemRenderer.continuationEndpoint.continuationCommand.token;
           continue;
         }
-        const parsed = this.parseRendererItem(item);
+        // Channel video continuations wrap each renderer in a rich item.
+        const actualItem = item?.richItemRenderer?.content ?? item;
+        const parsed = this.parseRendererItem(actualItem);
         if (parsed) parsedItems.push(parsed);
       }
 

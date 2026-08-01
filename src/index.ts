@@ -735,44 +735,126 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
     // ── Artist / Channel ──────────────────────────────────────
 
     async getArtist(browseId: string): Promise<ArtistInfo> {
-      const channel = await yt.getChannelHome(browseId);
-      if (!channel)
+      // A channel's Home tab is curated and often has no video shelf at all.
+      // Load the real Videos and Playlists tabs alongside it so every regular
+      // YouTube upload can be exposed as a playable audio track.
+      const [channel, channelVideos, channelPlaylists] = await Promise.all([
+        yt.getChannelHome(browseId).catch((error) => {
+          host.log('Channel home lookup failed:', error);
+          return null;
+        }),
+        yt.getChannelVideos(browseId).catch((error) => {
+          host.log('Channel videos lookup failed:', error);
+          return null;
+        }),
+        yt.getChannelPlaylists(browseId).catch((error) => {
+          host.log('Channel playlists lookup failed:', error);
+          return null;
+        }),
+      ]);
+      const channelMetadata = channel ?? channelVideos ?? channelPlaylists;
+      if (!channelMetadata)
         return { id: browseId, name: 'Unknown', thumbnail: '', sections: [], sourceId: SOURCE_ID };
+      const channelMeta =
+        channel?.channelMeta ?? channelVideos?.channelMeta ?? channelPlaylists?.channelMeta;
 
       const sections: ArtistSection[] = [];
-      for (const section of channel.sections) {
+      const videoItems: MediaFeedItem[] = [];
+      const seenVideoIds = new Set<string>();
+      const seenPlaylistIds = new Set<string>();
+
+      const appendVideos = (response: Awaited<ReturnType<typeof yt.getChannelVideos>>) => {
+        if (!response) return;
+        for (const section of response.sections) {
+          for (const item of section.items) {
+            if (!item.videoId || seenVideoIds.has(item.videoId)) continue;
+            seenVideoIds.add(item.videoId);
+            videoItems.push({
+              id: item.videoId,
+              title: item.title || '',
+              subtitle: item.channelName || channelMeta?.title || '',
+              thumbnail:
+                getBestThumbnail(item.thumbnails) ||
+                `https://i.ytimg.com/vi/${item.videoId}/hqdefault.jpg`,
+              type: 'song',
+              trackId: item.videoId,
+            });
+          }
+        }
+      };
+
+      appendVideos(channelVideos);
+
+      // Pull a couple of continuation pages so artist pages are not limited
+      // to the small first grid returned by YouTube.
+      let continuationToken = channelVideos?.continuationToken;
+      for (let page = 0; page < 2 && continuationToken; page += 1) {
+        try {
+          const continuation = await yt.continueResults(continuationToken);
+          appendVideos(continuation);
+          continuationToken = continuation?.continuationToken;
+        } catch (error) {
+          host.log('Channel videos continuation failed:', error);
+          break;
+        }
+      }
+
+      const supplementarySections = [
+        ...(channel?.sections ?? []),
+        ...(channelPlaylists?.sections ?? []),
+      ];
+      for (const section of supplementarySections) {
         const sectionTitle = section.title || '';
         const items: MediaFeedItem[] = [];
         for (const item of section.items) {
-          items.push({
-            id: item.videoId || item.playlistId || item.title || '',
-            title: item.title || '',
-            subtitle: item.channelName || '',
-            thumbnail: getBestThumbnail(item.thumbnails),
-            type: item.playlistId ? 'playlist' : 'song',
-            trackId: item.videoId || undefined,
-            browseId: item.playlistId || undefined,
-          });
+          // Prefer the video whenever an endpoint contains both a video and
+          // contextual playlist ID. The app plays videos as audio tracks.
+          if (item.videoId) {
+            if (seenVideoIds.has(item.videoId)) continue;
+            seenVideoIds.add(item.videoId);
+            videoItems.push({
+              id: item.videoId,
+              title: item.title || '',
+              subtitle: item.channelName || channelMeta?.title || '',
+              thumbnail:
+                getBestThumbnail(item.thumbnails) ||
+                `https://i.ytimg.com/vi/${item.videoId}/hqdefault.jpg`,
+              type: 'song',
+              trackId: item.videoId,
+            });
+          } else if (item.playlistId && !seenPlaylistIds.has(item.playlistId)) {
+            seenPlaylistIds.add(item.playlistId);
+            items.push({
+              id: item.playlistId,
+              title: item.title || '',
+              subtitle: item.channelName || '',
+              thumbnail: getBestThumbnail(item.thumbnails),
+              type: 'playlist',
+              browseId: item.playlistId,
+            });
+          }
         }
         if (items.length > 0) {
           const titleLower = sectionTitle.toLowerCase();
-          let sectionType: ArtistSection['type'] = 'other';
-          if (titleLower.includes('video')) sectionType = 'videos';
-          else if (titleLower.includes('playlist')) sectionType = 'playlists';
+          let sectionType: ArtistSection['type'] = 'playlists';
+          if (titleLower.includes('playlist')) sectionType = 'playlists';
           else if (titleLower.includes('single')) sectionType = 'singles';
           else if (titleLower.includes('album')) sectionType = 'albums';
-          else if (titleLower.includes('song')) sectionType = 'songs';
 
-          sections.push({ title: sectionTitle, type: sectionType, items });
+          sections.push({ title: sectionTitle || 'Playlists', type: sectionType, items });
         }
+      }
+
+      if (videoItems.length > 0) {
+        sections.unshift({ title: 'Videos', type: 'videos', items: videoItems });
       }
 
       return {
         id: browseId,
-        name: channel.channelMeta?.title || 'Unknown',
-        description: channel.channelMeta?.description || undefined,
-        thumbnail: getBestThumbnail(channel.channelMeta?.thumbnails),
-        subscribers: channel.channelMeta?.subscriberCount || undefined,
+        name: channelMeta?.title || 'Unknown',
+        description: channelMeta?.description || undefined,
+        thumbnail: getBestThumbnail(channelMeta?.thumbnails),
+        subscribers: channelMeta?.subscriberCount || undefined,
         sections,
         sourceId: SOURCE_ID,
       };
