@@ -716,7 +716,9 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
             type: 'track',
             title: item.title || '',
             artist: item.channelName || 'Unknown',
-            artwork: getBestThumbnail(item.thumbnails),
+            artwork:
+              getBestThumbnail(item.thumbnails) ||
+              `https://i.ytimg.com/vi/${item.videoId}/hqdefault.jpg`,
             duration: parseDuration(item.lengthText),
             contentId: item.videoId,
           });

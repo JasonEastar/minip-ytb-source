@@ -1075,7 +1075,9 @@ export class BrowseService {
       // playlists. YouTube video IDs are always 11 URL-safe characters;
       // playlist IDs are longer and must be sent back through /browse.
       const isVideo = Boolean(contentId && /^[A-Za-z0-9_-]{11}$/.test(contentId));
-      const contentImage = lvm.contentImage?.collectionThumbnailViewModel?.primaryThumbnail?.thumbnailViewModel;
+      const contentImage =
+        lvm.contentImage?.collectionThumbnailViewModel?.primaryThumbnail?.thumbnailViewModel ??
+        lvm.contentImage?.thumbnailViewModel;
       const metadata = lvm.metadata?.lockupMetadataViewModel;
       const titleText = metadata?.title?.content;
       const metadataRows = metadata?.metadata?.contentMetadataViewModel?.metadataRows;
