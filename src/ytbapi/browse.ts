@@ -1059,6 +1059,11 @@ export class BrowseService {
     // lockupViewModel (newer YouTube related video format)
     const lvm = item.lockupViewModel;
     if (lvm) {
+      const contentId = typeof lvm.contentId === 'string' ? lvm.contentId : undefined;
+      // New channel grids use the same lockup renderer for videos and
+      // playlists. YouTube video IDs are always 11 URL-safe characters;
+      // playlist IDs are longer and must be sent back through /browse.
+      const isVideo = Boolean(contentId && /^[A-Za-z0-9_-]{11}$/.test(contentId));
       const contentImage = lvm.contentImage?.collectionThumbnailViewModel?.primaryThumbnail?.thumbnailViewModel;
       const metadata = lvm.metadata?.lockupMetadataViewModel;
       const titleText = metadata?.title?.content;
@@ -1081,7 +1086,8 @@ export class BrowseService {
       }
 
       return {
-        videoId: lvm.contentId,
+        videoId: isVideo ? contentId : undefined,
+        playlistId: !isVideo ? contentId : undefined,
         title: titleText,
         thumbnails: contentImage?.overlays?.[0]?.thumbnailOverlayBadgeViewModel?.thumbnailBadges?.[0]?.thumbnailBadgeViewModel?.icon?.sources ??
           contentImage?.image?.sources,
