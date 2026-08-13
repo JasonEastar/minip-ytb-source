@@ -1,14 +1,16 @@
 import { stat } from 'node:fs/promises';
 import { createRequire } from 'node:module';
+import { BotGuardClient } from 'bgutils-js/botguard';
+import { buildURL, getHeaders, USER_AGENT } from 'bgutils-js/utils';
+import { WebPoMinter } from 'bgutils-js/webpo';
+import { JSDOM } from 'jsdom';
 
 const require = createRequire(import.meta.url);
 const VIDEO_ID = 'dQw4w9WgXcQ';
 const REPORTED_VIDEO_IDS = [
-  'DCANiJsostQ',
-  'H6VwXiasdqY',
-  'kZpXTYzp3F0',
-  'mwHnDQQ-nMg',
-  'O1lY_6et8W0',
+  // Pinkfong Baby Shark exercises the PO-token path: its mobile-client URL
+  // allows early bytes but rejects later ranges without content attestation.
+  'XqZsoesa55w',
 ];
 const RANGE_START = 128 * 1024;
 const RANGE_LENGTH = 1024;
@@ -45,6 +47,70 @@ const sourceStorage = new Map();
 let sawAndroidVrUserAgent = false;
 let sawIosUserAgent = false;
 let forcedIndexedHlsRetry = false;
+let generatedPoTokenCount = 0;
+
+async function generatePoToken(request) {
+  const dom = new JSDOM('<!doctype html><html><head></head><body></body></html>', {
+    url: 'https://www.youtube.com/',
+    referrer: 'https://www.youtube.com/',
+    userAgent: USER_AGENT,
+  });
+  dom.window.HTMLCanvasElement.prototype.getContext = () => null;
+  const globalKeys = ['window', 'document', 'location', 'origin'];
+  const previousDescriptors = new Map(
+    globalKeys.map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)])
+  );
+
+  let botGuardClient;
+  try {
+    Object.assign(globalThis, {
+      window: dom.window,
+      document: dom.window.document,
+      location: dom.window.location,
+      origin: dom.window.origin,
+    });
+    const interpreter = await fetch(request.interpreterUrl);
+    if (!interpreter.ok) throw new Error(`Interpreter HTTP ${interpreter.status}`);
+    new Function(await interpreter.text())();
+
+    botGuardClient = await BotGuardClient.create({
+      program: request.program,
+      globalName: request.globalName,
+      globalObject: globalThis,
+    });
+    botGuardClient.defaultTimeout = 10_000;
+    const webPoSignalOutput = [];
+    const botguardResponse = await botGuardClient.snapshot(
+      { webPoSignalOutput },
+      botGuardClient.defaultTimeout
+    );
+    const integrityResponse = await fetch(buildURL('GenerateIT', true), {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify(['O43z0dpjhgX20SCx4KAo', botguardResponse]),
+    });
+    const [integrityToken, estimatedTtlSecs, mintRefreshThreshold, websafeFallbackToken] =
+      await integrityResponse.json();
+    const minter = await WebPoMinter.create(
+      { integrityToken, estimatedTtlSecs, mintRefreshThreshold, websafeFallbackToken },
+      webPoSignalOutput
+    );
+    const tokens = {};
+    for (const binding of request.contentBindings) {
+      tokens[binding] = await minter.mintAsWebsafeString(binding);
+      generatedPoTokenCount++;
+    }
+    return { tokens, expiresAt: Date.now() + estimatedTtlSecs * 1000 - 300_000 };
+  } finally {
+    if (botGuardClient) await botGuardClient.shutdown().catch(() => undefined);
+    dom.window.close();
+    for (const key of globalKeys) {
+      const descriptor = previousDescriptors.get(key);
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    }
+  }
+}
 const sourceFetch = async (input, init) => {
   if (typeof init?.body === 'string') {
     try {
@@ -91,6 +157,7 @@ const source = factory({
     set: (key, value) => sourceStorage.set(key, value),
     delete: (key) => sourceStorage.delete(key),
   },
+  youtube: { generatePoToken },
   log: (...args) => console.log('[youtube-smoke]', ...args),
 });
 
@@ -242,6 +309,9 @@ try {
   if (!forcedIndexedHlsRetry) {
     throw new Error('Indexed HLS fresh-URL retry was not exercised');
   }
+  if (generatedPoTokenCount === 0) {
+    throw new Error('Protected-track PO-token fallback was not exercised');
+  }
 
   console.log(
     JSON.stringify(
@@ -259,6 +329,7 @@ try {
           androidVr: sawAndroidVrUserAgent,
         },
         reportedResults,
+        generatedPoTokenCount,
       },
       null,
       2

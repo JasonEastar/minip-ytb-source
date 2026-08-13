@@ -64,6 +64,20 @@ export interface SourceHost {
     delete(key: string): void;
   };
 
+  /** Browser-backed BotGuard execution supplied by the MiniP app. */
+  youtube?: {
+    generatePoToken(request: {
+      requestId: string;
+      interpreterUrl: string;
+      program: string;
+      globalName: string;
+      contentBindings: string[];
+    }): Promise<{
+      tokens: Record<string, string>;
+      expiresAt: number;
+    }>;
+  };
+
   // ─── Logging ──────────────────────────────────────────────
 
   log(...args: unknown[]): void;

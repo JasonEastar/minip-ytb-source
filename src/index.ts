@@ -11,7 +11,7 @@
  *   module.exports = function createSource(host) { ... return source; }
  */
 
-import { ClientType, Innertube } from 'youtubei.js/react-native';
+import { ClientType, Innertube, Platform } from 'youtubei.js/react-native';
 import { InnertubeService } from './ytbapi';
 import type { SourceHost } from './types/host';
 import type { MediaSource } from './types/source';
@@ -41,10 +41,11 @@ type MediaClient = 'ANDROID_VR' | 'IOS';
 type OfficialVideoInfo = Awaited<ReturnType<Innertube['getBasicInfo']>>;
 type OfficialFormat = NonNullable<OfficialVideoInfo['streaming_data']>['adaptive_formats'][number];
 type VerifiedDirectAudio = {
-  client: MediaClient;
+  client: MediaClient | 'YTMUSIC';
   format: OfficialFormat;
   headers: Record<string, string>;
 };
+type CachedPoToken = { token: string; expiresAt: number };
 type IndexedMediaSegment = {
   offset: number;
   size: number;
@@ -75,6 +76,7 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
       cachedAt: number;
     }
   >();
+  const _poTokenCache = new Map<string, CachedPoToken>();
 
   async function getCachedVideoInfo(contentId: string): Promise<any> {
     if (
@@ -155,6 +157,102 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
     return error instanceof Error ? error.message : String(error);
   }
 
+  function createRequestId(): string {
+    return `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+  }
+
+  async function getContentPoToken(contentId: string, forceNew = false): Promise<string> {
+    const cached = _poTokenCache.get(contentId);
+    if (!forceNew && cached && cached.expiresAt > Date.now()) return cached.token;
+
+    if (!mediaYt) throw new Error('YouTube.js media client is unavailable');
+    if (!host.youtube?.generatePoToken) {
+      throw new Error('This MiniP version does not provide YouTube browser attestation');
+    }
+
+    const response = await mediaYt.getAttestationChallenge('ENGAGEMENT_TYPE_UNBOUND');
+    const challenge = response.bg_challenge;
+    const interpreterUrl =
+      challenge?.interpreter_url?.private_do_not_access_or_else_trusted_resource_url_wrapped_value;
+    if (!challenge || !interpreterUrl) {
+      throw new Error('YouTube did not return a usable BotGuard challenge');
+    }
+
+    const result = await host.youtube.generatePoToken({
+      requestId: createRequestId(),
+      interpreterUrl: interpreterUrl.startsWith('//') ? `https:${interpreterUrl}` : interpreterUrl,
+      program: challenge.program,
+      globalName: challenge.global_name,
+      contentBindings: [contentId],
+    });
+    const token = result.tokens[contentId];
+    if (!token) throw new Error('YouTube attestation did not mint a content token');
+
+    _poTokenCache.set(contentId, { token, expiresAt: result.expiresAt });
+    return token;
+  }
+
+  async function resolveProtectedWebAudio(
+    contentId: string,
+    forceToken = false
+  ): Promise<VerifiedDirectAudio> {
+    if (!mediaYt) throw new Error('YouTube.js media client is unavailable');
+
+    const token = await getContentPoToken(contentId, forceToken);
+    const info = await mediaYt.getBasicInfo(contentId, { client: 'YTMUSIC' });
+    const formats = (info.streaming_data?.adaptive_formats ?? [])
+      .filter((format) => format.has_audio && !format.has_video)
+      .sort((a, b) => {
+        const aIsMp4 = a.mime_type.includes('audio/mp4') ? 1 : 0;
+        const bIsMp4 = b.mime_type.includes('audio/mp4') ? 1 : 0;
+        if (aIsMp4 !== bIsMp4) return bIsMp4 - aIsMp4;
+        return (b.bitrate || 0) - (a.bitrate || 0);
+      });
+    if (formats.length === 0) {
+      const reason =
+        info.playability_status?.reason || info.playability_status?.status || 'no audio formats';
+      throw new Error(`YTMUSIC player did not return audio formats (${reason})`);
+    }
+    const failures: string[] = [];
+
+    for (const format of formats) {
+      try {
+        if (!mediaYt.session.player) throw new Error('YouTube player script is unavailable');
+        const decipheredUrl = await format.decipher(mediaYt.session.player);
+        const separator = decipheredUrl.includes('?') ? '&' : '?';
+        const url = `${decipheredUrl}${separator}pot=${encodeURIComponent(token)}`;
+        const contentLength = format.content_length ?? 0;
+        const probeOffsets = [0];
+        if (contentLength > 2) {
+          probeOffsets.push(Math.floor(contentLength / 2), contentLength - 1);
+        }
+
+        let verified = true;
+        for (const offset of probeOffsets) {
+          const probe = await host.fetch(url, { headers: { Range: `bytes=${offset}-${offset}` } });
+          const ok = probe.status === 206;
+          await probe.body?.cancel();
+          if (!ok) {
+            failures.push(`itag ${format.itag} offset ${offset}: HTTP ${probe.status}`);
+            verified = false;
+            break;
+          }
+        }
+        if (!verified) continue;
+
+        return {
+          client: 'YTMUSIC',
+          format: { ...format, url } as OfficialFormat,
+          headers: {},
+        };
+      } catch (error) {
+        failures.push(`itag ${format.itag}: ${errorMessage(error)}`);
+      }
+    }
+
+    throw new Error(`No verified PO-token audio URL (${failures.join('; ')})`);
+  }
+
   async function probeMediaUrl(
     url: string,
     headers: Record<string, string>,
@@ -206,7 +304,33 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
         for (const format of formats) {
           if (!format.url) continue;
           const probe = await probeMediaUrl(format.url, headers, true);
-          if (probe.ok) return { client, format, headers };
+          if (probe.ok) {
+            const qualificationRanges = ['bytes=0-'];
+            const contentLength = format.content_length ?? 0;
+            if (contentLength > 2) {
+              const middle = Math.floor(contentLength / 2);
+              qualificationRanges.push(
+                `bytes=${middle}-${middle}`,
+                `bytes=${contentLength - 1}-${contentLength - 1}`
+              );
+            }
+
+            let qualified = true;
+            for (const range of qualificationRanges) {
+              const rangeProbe = await host.fetch(format.url, {
+                headers: { ...headers, Range: range },
+              });
+              const rangeOk = rangeProbe.status === 206;
+              await rangeProbe.body?.cancel();
+              if (!rangeOk) {
+                failures.push(`${client} itag ${format.itag} ${range}: HTTP ${rangeProbe.status}`);
+                qualified = false;
+                break;
+              }
+            }
+            if (qualified) return { client, format, headers };
+            continue;
+          }
 
           failures.push(
             `${client} itag ${format.itag}: ${
@@ -397,7 +521,7 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
   const source: MediaSource = {
     id: SOURCE_ID,
     name: 'YouTube Music',
-    version: '1.3.2',
+    version: '1.4.0',
     capabilities: {
       audio: true,
       video: true,
@@ -415,6 +539,10 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
       });
 
       try {
+        // The React Native entry intentionally ships without an evaluator.
+        // MiniP already executes installed source bundles in a JavaScript VM,
+        // so use that VM for the small player function YouTube.js extracts.
+        Platform.shim.eval = async (data) => new Function(data.output)();
         mediaYt = await Innertube.create({
           // A WEB base session keeps generic endpoints (notably search)
           // compatible with YouTube.js' parser. Media requests explicitly
@@ -429,7 +557,9 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
           // removes its otherwise token-free direct formats.
           generate_session_locally: false,
           retrieve_innertube_config: false,
-          retrieve_player: false,
+          // Protected Web/YTMUSIC formats are ciphered and need the current
+          // player script. Mobile fast-path formats remain direct URLs.
+          retrieve_player: true,
           // YouTube.js 17.2 does not override the HTTP User-Agent when a
           // request selects ANDROID_VR, even though its JSON context does.
           // Keep the transport header aligned with both media client profiles;
@@ -448,6 +578,7 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
       yt.invalidateSession();
       mediaYt = null;
       _officialVideoInfoCache.clear();
+      _poTokenCache.clear();
     },
 
     // ── Playback ──────────────────────────────────────────────
@@ -516,6 +647,27 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
         host.log('YouTube.js direct stream lookup failed:', error);
       }
 
+      if (host.youtube?.generatePoToken) {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const resolved = await resolveProtectedWebAudio(contentId, attempt > 0);
+            if (host.platform === 'ios') {
+              const indexedHls = await createIndexedHlsStream(contentId, resolved);
+              if (indexedHls) {
+                host.log('Using PO-token YTMUSIC indexed HLS stream for', contentId);
+                return indexedHls;
+              }
+            }
+
+            host.log('Using PO-token YTMUSIC direct audio for', contentId);
+            return { url: resolved.format.url!, headers: resolved.headers };
+          } catch (error) {
+            _poTokenCache.delete(contentId);
+            host.log(`PO-token stream attempt ${attempt + 1} failed:`, error);
+          }
+        }
+      }
+
       const fallbackInfo = await getCachedVideoInfo(contentId);
       if (!fallbackInfo) throw new Error('Failed to get video info for ' + contentId);
       const fallbackHeaders = { 'User-Agent': IOS_USER_AGENT };
@@ -563,6 +715,24 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
       } catch (error) {
         officialError = error;
         host.log('YouTube.js download lookup failed, using adapter fallback:', error);
+      }
+
+      if (host.youtube?.generatePoToken) {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const resolved = await resolveProtectedWebAudio(contentId, attempt > 0);
+            host.log('Using PO-token YTMUSIC download URL for', contentId);
+            return {
+              url: resolved.format.url!,
+              contentLength: resolved.format.content_length ?? 0,
+              headers: { Range: DOWNLOAD_RANGE_HEADER },
+            };
+          } catch (error) {
+            _poTokenCache.delete(contentId);
+            officialError = error;
+            host.log(`PO-token download attempt ${attempt + 1} failed:`, error);
+          }
+        }
       }
 
       const fallbackInfo = await yt.getVideoInfo(contentId, 'IOS');

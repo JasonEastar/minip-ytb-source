@@ -79,6 +79,10 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
 - All native capabilities come through `SourceHost`
 - The `src/types/` directory serves as the SDK contract
 
+Protected Google Video URLs use the optional `host.youtube.generatePoToken`
+capability. MiniP implements it with a hidden WebView that runs BotGuard; hosts
+without that capability retain the mobile-client playback paths.
+
 ## Creating Your Own Source
 
 Use the `src/types/` directory as your SDK:
