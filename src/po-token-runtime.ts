@@ -1,9 +1,7 @@
 import { BotGuardClient } from 'bgutils-js/botguard';
 import type { WebPoSignalOutput } from 'bgutils-js/shared-types';
-import { buildURL, getHeaders } from 'bgutils-js/utils';
 import { WebPoMinter } from 'bgutils-js/webpo';
 
-const REQUEST_KEY = 'O43z0dpjhgX20SCx4KAo';
 const TOKEN_EXPIRY_SAFETY_MS = 5 * 60 * 1000;
 
 interface PoTokenRequest {
@@ -18,16 +16,36 @@ interface NativeBridge {
   postMessage(message: string): void;
 }
 
+interface PoTokenIntegrityResponse {
+  requestId: string;
+  integrityToken: string;
+  estimatedTtlSecs: number;
+  mintRefreshThreshold: number;
+  websafeFallbackToken: string;
+}
+
+interface PendingMint {
+  request: PoTokenRequest;
+  botGuardClient: BotGuardClient;
+  interpreterScript: HTMLScriptElement;
+  webPoSignalOutput: WebPoSignalOutput;
+}
+
 declare global {
   interface Window {
     ReactNativeWebView?: NativeBridge;
     __MINIP_GENERATE_YOUTUBE_PO_TOKEN__: (request: PoTokenRequest) => Promise<void>;
+    __MINIP_COMPLETE_YOUTUBE_PO_TOKEN__: (
+      response: PoTokenIntegrityResponse
+    ) => Promise<void>;
     __MINIP_EVALUATE_YOUTUBE_PLAYER__: (request: {
       requestId: string;
       output: string;
     }) => Promise<void>;
   }
 }
+
+const pendingMints = new Map<string, PendingMint>();
 
 function postMessage(message: Record<string, unknown>): void {
   window.ReactNativeWebView?.postMessage(JSON.stringify(message));
@@ -125,37 +143,18 @@ window.__MINIP_GENERATE_YOUTUBE_PO_TOKEN__ = async (request) => {
       { webPoSignalOutput },
       botGuardClient.defaultTimeout
     );
-    const response = await fetch(buildURL('GenerateIT', true), {
-      method: 'POST',
-      headers: getHeaders(),
-      body: JSON.stringify([REQUEST_KEY, botguardResponse]),
+    pendingMints.set(request.requestId, {
+      request,
+      botGuardClient,
+      interpreterScript,
+      webPoSignalOutput,
     });
-    if (!response.ok) {
-      throw new Error(`YouTube integrity service returned HTTP ${response.status}`);
-    }
-
-    const [integrityToken, estimatedTtlSecs, mintRefreshThreshold, websafeFallbackToken] =
-      (await response.json()) as [string, number, number, string];
-    const minter = await WebPoMinter.create(
-      {
-        integrityToken,
-        estimatedTtlSecs,
-        mintRefreshThreshold,
-        websafeFallbackToken,
-      },
-      webPoSignalOutput
-    );
-
-    const tokens: Record<string, string> = {};
-    for (const binding of request.contentBindings) {
-      tokens[binding] = await minter.mintAsWebsafeString(binding);
-    }
-
+    botGuardClient = null;
+    interpreterScript = null;
     postMessage({
-      type: 'youtube-po-result',
+      type: 'youtube-po-snapshot',
       requestId: request.requestId,
-      tokens,
-      expiresAt: Date.now() + Math.max(60_000, estimatedTtlSecs * 1000 - TOKEN_EXPIRY_SAFETY_MS),
+      botguardResponse,
     });
   } catch (error) {
     postMessage({
@@ -168,6 +167,47 @@ window.__MINIP_GENERATE_YOUTUBE_PO_TOKEN__ = async (request) => {
       void botGuardClient.shutdown().catch(() => undefined);
     }
     interpreterScript?.remove();
+  }
+};
+
+window.__MINIP_COMPLETE_YOUTUBE_PO_TOKEN__ = async (response) => {
+  const pending = pendingMints.get(response.requestId);
+  if (!pending) return;
+  pendingMints.delete(response.requestId);
+
+  try {
+    const minter = await WebPoMinter.create(
+      {
+        integrityToken: response.integrityToken,
+        estimatedTtlSecs: response.estimatedTtlSecs,
+        mintRefreshThreshold: response.mintRefreshThreshold,
+        websafeFallbackToken: response.websafeFallbackToken,
+      },
+      pending.webPoSignalOutput
+    );
+
+    const tokens: Record<string, string> = {};
+    for (const binding of pending.request.contentBindings) {
+      tokens[binding] = await minter.mintAsWebsafeString(binding);
+    }
+
+    postMessage({
+      type: 'youtube-po-result',
+      requestId: response.requestId,
+      tokens,
+      expiresAt:
+        Date.now() +
+        Math.max(60_000, response.estimatedTtlSecs * 1000 - TOKEN_EXPIRY_SAFETY_MS),
+    });
+  } catch (error) {
+    postMessage({
+      type: 'youtube-po-error',
+      requestId: response.requestId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  } finally {
+    void pending.botGuardClient.shutdown().catch(() => undefined);
+    pending.interpreterScript.remove();
   }
 };
 
