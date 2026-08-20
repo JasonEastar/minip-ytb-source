@@ -37,6 +37,7 @@ jobs:
             const fs = require('fs');
             const m = JSON.parse(fs.readFileSync('manifest.json', 'utf8'));
             m.version = '${{ steps.version.outputs.version }}';
+            m.bundleUrl = 'https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/youtube.bundle.js';
             fs.writeFileSync('manifest.json', JSON.stringify(m, null, 2) + '\n');
           "
           cat manifest.json
@@ -60,12 +61,12 @@ jobs:
 
             **Bundle:**
             ```
-            https://github.com/${{ github.repository }}/releases/latest/download/youtube.bundle.js
+            https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/youtube.bundle.js
             ```
 
             **Manifest:**
             ```
-            https://github.com/${{ github.repository }}/releases/latest/download/manifest.json
+            https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/manifest.json
             ```
           files: |
             dist/youtube.bundle.js

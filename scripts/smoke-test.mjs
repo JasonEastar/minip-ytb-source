@@ -1,5 +1,6 @@
 import { stat } from 'node:fs/promises';
 import { createRequire } from 'node:module';
+import { Buffer } from 'node:buffer';
 import { BotGuardClient } from 'bgutils-js/botguard';
 import { buildURL, getHeaders, USER_AGENT } from 'bgutils-js/utils';
 import { WebPoMinter } from 'bgutils-js/webpo';
@@ -46,8 +47,12 @@ if (typeof factory !== 'function') {
 const sourceStorage = new Map();
 let sawAndroidVrUserAgent = false;
 let sawIosUserAgent = false;
+let sawProtectedPlayerPoToken = false;
 let forcedIndexedHlsRetry = false;
 let generatedPoTokenCount = 0;
+let playerEvaluationCount = 0;
+let browserMediaProbeCount = 0;
+let nativeProtectedBlocksRemaining = 3;
 
 async function generatePoToken(request) {
   const dom = new JSDOM('<!doctype html><html><head></head><body></body></html>', {
@@ -122,6 +127,13 @@ const sourceFetch = async (input, init) => {
       } else if (clientName === 'iOS') {
         sawIosUserAgent = userAgent.includes('com.google.ios.youtube');
       }
+      if (
+        payload?.videoId === REPORTED_VIDEO_IDS[0] &&
+        typeof payload?.serviceIntegrityDimensions?.poToken === 'string' &&
+        payload.serviceIntegrityDimensions.poToken.length > 0
+      ) {
+        sawProtectedPlayerPoToken = true;
+      }
     } catch {
       // Ignore non-JSON requests.
     }
@@ -132,6 +144,17 @@ const sourceFetch = async (input, init) => {
   // far one-byte qualification probe receives the 403 seen in production.
   const range = new Headers(init?.headers).get('Range');
   const oneByteRange = range?.match(/^bytes=(\d+)-\1$/);
+  const requestUrl = typeof input === 'string' ? input : input.url;
+  if (
+    sawProtectedPlayerPoToken &&
+    nativeProtectedBlocksRemaining > 0 &&
+    oneByteRange &&
+    requestUrl.includes('.googlevideo.com/') &&
+    new URL(requestUrl).searchParams.has('pot')
+  ) {
+    nativeProtectedBlocksRemaining--;
+    return new Response(null, { status: 403 });
+  }
   if (!forcedIndexedHlsRetry && oneByteRange && Number(oneByteRange[1]) > 1024 * 1024) {
     forcedIndexedHlsRetry = true;
     return new Response(null, { status: 403 });
@@ -157,7 +180,14 @@ const source = factory({
     set: (key, value) => sourceStorage.set(key, value),
     delete: (key) => sourceStorage.delete(key),
   },
-  youtube: { generatePoToken },
+  youtube: {
+    generatePoToken,
+    evaluatePlayerScript: async ({ output }) => {
+      playerEvaluationCount++;
+      if (output.startsWith('return fetch(')) browserMediaProbeCount++;
+      return new Function(output)();
+    },
+  },
   log: (...args) => console.log('[youtube-smoke]', ...args),
 });
 
@@ -305,6 +335,15 @@ try {
       indexedHlsSegmentBytes,
     });
   }
+  if (!sawProtectedPlayerPoToken) {
+    throw new Error('Protected player request did not include its content-bound PO token');
+  }
+  if (playerEvaluationCount === 0) {
+    throw new Error('Protected playback did not use the host player evaluator');
+  }
+  if (browserMediaProbeCount < 3 || nativeProtectedBlocksRemaining !== 0) {
+    throw new Error('Protected playback did not recover from native 403s in the browser context');
+  }
 
   if (!forcedIndexedHlsRetry) {
     throw new Error('Indexed HLS fresh-URL retry was not exercised');
@@ -330,6 +369,9 @@ try {
         },
         reportedResults,
         generatedPoTokenCount,
+        protectedPlayerPoToken: sawProtectedPlayerPoToken,
+        playerEvaluationCount,
+        browserMediaProbeCount,
       },
       null,
       2

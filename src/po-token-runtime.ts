@@ -22,6 +22,10 @@ declare global {
   interface Window {
     ReactNativeWebView?: NativeBridge;
     __MINIP_GENERATE_YOUTUBE_PO_TOKEN__: (request: PoTokenRequest) => Promise<void>;
+    __MINIP_EVALUATE_YOUTUBE_PLAYER__: (request: {
+      requestId: string;
+      output: string;
+    }) => Promise<void>;
   }
 }
 
@@ -80,6 +84,26 @@ async function loadInterpreter(url: URL, requestId: string): Promise<HTMLScriptE
   });
   return script;
 }
+
+window.__MINIP_EVALUATE_YOUTUBE_PLAYER__ = async (request) => {
+  try {
+    if (!request.requestId || !request.output || request.output.length > 1_000_000) {
+      throw new Error('Invalid YouTube player evaluation request');
+    }
+    const result = await Promise.resolve(new Function(request.output)());
+    postMessage({
+      type: 'youtube-player-result',
+      requestId: request.requestId,
+      result,
+    });
+  } catch (error) {
+    postMessage({
+      type: 'youtube-browser-error',
+      requestId: request.requestId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+};
 
 window.__MINIP_GENERATE_YOUTUBE_PO_TOKEN__ = async (request) => {
   let botGuardClient: BotGuardClient | null = null;

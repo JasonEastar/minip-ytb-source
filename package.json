@@ -1,6 +1,6 @@
 {
   "name": "@minip/source-youtube",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "YouTube Music source plugin for Minip",
   "private": true,
   "main": "dist/youtube.bundle.js",
@@ -12,7 +12,7 @@
     "clean": "rimraf dist"
   },
   "dependencies": {
-    "youtubei.js": "^17.2.0"
+    "youtubei.js": "^18.0.0"
   },
   "devDependencies": {
     "@babel/core": "^7.28.0",

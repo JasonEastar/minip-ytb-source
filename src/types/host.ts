@@ -46,7 +46,7 @@ export interface SourceHost {
     url: string,
     contentLength: number,
     outputPath: string,
-    threads: number,
+    threads: number
   ): Promise<void>;
 
   /** Cancel the currently active download. */
@@ -66,6 +66,10 @@ export interface SourceHost {
 
   /** Browser-backed BotGuard execution supplied by the MiniP app. */
   youtube?: {
+    evaluatePlayerScript(request: {
+      requestId: string;
+      output: string;
+    }): Promise<Record<string, unknown>>;
     generatePoToken(request: {
       requestId: string;
       interpreterUrl: string;

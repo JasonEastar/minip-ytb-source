@@ -37,6 +37,8 @@ const IOS_USER_AGENT =
   'com.google.ios.youtube/20.11.6 (iPhone10,4; U; CPU iOS 16_7_7 like Mac OS X)';
 const ANDROID_VR_USER_AGENT =
   'com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip';
+const WEB_USER_AGENT =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36';
 type MediaClient = 'ANDROID_VR' | 'IOS';
 type OfficialVideoInfo = Awaited<ReturnType<Innertube['getBasicInfo']>>;
 type OfficialFormat = NonNullable<OfficialVideoInfo['streaming_data']>['adaptive_formats'][number];
@@ -128,7 +130,9 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
             ? ANDROID_VR_USER_AGENT
             : clientName === 'iOS'
               ? IOS_USER_AGENT
-              : undefined;
+              : clientName === 'WEB' || clientName === 'WEB_REMIX'
+                ? WEB_USER_AGENT
+                : undefined;
         if (userAgent) {
           const adjustedHeaders = new Headers(headers);
           adjustedHeaders.set('User-Agent', userAgent);
@@ -159,6 +163,26 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
 
   function createRequestId(): string {
     return `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+  }
+
+  async function probeProtectedMediaInBrowser(url: string, offset: number): Promise<boolean> {
+    if (!host.youtube?.evaluatePlayerScript) return false;
+
+    try {
+      const range = `bytes=${offset}-${offset}`;
+      const result = await host.youtube.evaluatePlayerScript({
+        requestId: createRequestId(),
+        output: `return fetch(${JSON.stringify(url)}, { headers: { Range: ${JSON.stringify(
+          range
+        )} } }).then(async function(response) {
+          if (response.body && response.body.cancel) await response.body.cancel();
+          return { status: response.status };
+        });`,
+      });
+      return result.status === 206;
+    } catch {
+      return false;
+    }
   }
 
   async function getContentPoToken(contentId: string, forceNew = false): Promise<string> {
@@ -199,7 +223,13 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
     if (!mediaYt) throw new Error('YouTube.js media client is unavailable');
 
     const token = await getContentPoToken(contentId, forceToken);
-    const info = await mediaYt.getBasicInfo(contentId, { client: 'YTMUSIC' });
+    // Send the content-bound token with the player request as well as the
+    // eventual media URL. Newer YouTube clients can withhold protected
+    // formats unless serviceIntegrityDimensions is present on /player.
+    const info = await mediaYt.getBasicInfo(contentId, {
+      client: 'YTMUSIC',
+      po_token: token,
+    });
     const formats = (info.streaming_data?.adaptive_formats ?? [])
       .filter((format) => format.has_audio && !format.has_video)
       .sort((a, b) => {
@@ -229,8 +259,13 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
 
         let verified = true;
         for (const offset of probeOffsets) {
-          const probe = await host.fetch(url, { headers: { Range: `bytes=${offset}-${offset}` } });
-          const ok = probe.status === 206;
+          const probe = await host.fetch(url, {
+            headers: {
+              Range: `bytes=${offset}-${offset}`,
+              'User-Agent': WEB_USER_AGENT,
+            },
+          });
+          const ok = probe.status === 206 || (await probeProtectedMediaInBrowser(url, offset));
           await probe.body?.cancel();
           if (!ok) {
             failures.push(`itag ${format.itag} offset ${offset}: HTTP ${probe.status}`);
@@ -243,7 +278,7 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
         return {
           client: 'YTMUSIC',
           format: { ...format, url } as OfficialFormat,
-          headers: {},
+          headers: { 'User-Agent': WEB_USER_AGENT },
         };
       } catch (error) {
         failures.push(`itag ${format.itag}: ${errorMessage(error)}`);
@@ -521,7 +556,7 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
   const source: MediaSource = {
     id: SOURCE_ID,
     name: 'YouTube Music',
-    version: '1.4.0',
+    version: '1.4.1',
     capabilities: {
       audio: true,
       video: true,
@@ -542,7 +577,13 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
         // The React Native entry intentionally ships without an evaluator.
         // MiniP already executes installed source bundles in a JavaScript VM,
         // so use that VM for the small player function YouTube.js extracts.
-        Platform.shim.eval = async (data) => new Function(data.output)();
+        Platform.shim.eval = async (data) =>
+          host.youtube?.evaluatePlayerScript
+            ? host.youtube.evaluatePlayerScript({
+                requestId: createRequestId(),
+                output: data.output,
+              })
+            : new Function(data.output)();
         mediaYt = await Innertube.create({
           // A WEB base session keeps generic endpoints (notably search)
           // compatible with YouTube.js' parser. Media requests explicitly
@@ -560,9 +601,7 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
           // Protected Web/YTMUSIC formats are ciphered and need the current
           // player script. Mobile fast-path formats remain direct URLs.
           retrieve_player: true,
-          // YouTube.js 17.2 does not override the HTTP User-Agent when a
-          // request selects ANDROID_VR, even though its JSON context does.
-          // Keep the transport header aligned with both media client profiles;
+          // Keep transport headers aligned when a request switches clients;
           // YouTube can otherwise suppress or reject their playback formats.
           fetch: mediaFetch,
         });
@@ -725,7 +764,7 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
             return {
               url: resolved.format.url!,
               contentLength: resolved.format.content_length ?? 0,
-              headers: { Range: DOWNLOAD_RANGE_HEADER },
+              headers: { ...resolved.headers, Range: DOWNLOAD_RANGE_HEADER },
             };
           } catch (error) {
             _poTokenCache.delete(contentId);
@@ -898,8 +937,7 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
       return {
         title: playlist.channelMeta?.title || 'Playlist',
         subtitle: '',
-        thumbnail:
-          getBestThumbnail(playlist.channelMeta?.thumbnails) || items[0]?.artwork || '',
+        thumbnail: getBestThumbnail(playlist.channelMeta?.thumbnails) || items[0]?.artwork || '',
         items,
         collectionType: 'playlist',
       };
@@ -1110,7 +1148,7 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
   }
 
   function getBestThumbnail(
-    thumbnails?: Array<{ url: string; width?: number; height?: number }>
+    thumbnails?: { url: string; width?: number; height?: number }[]
   ): string {
     if (!Array.isArray(thumbnails) || thumbnails.length === 0) return '';
     let url = thumbnails[thumbnails.length - 1]?.url ?? '';

@@ -31,7 +31,7 @@ const externalDeps = [
 
 const isExternal = (id) => {
   if (id.startsWith('.') || path.isAbsolute(id)) return false;
-  return externalDeps.some(dep => id === dep || id.startsWith(dep + '/'));
+  return externalDeps.some((dep) => id === dep || id.startsWith(dep + '/'));
 };
 
 const plugins = [
@@ -49,14 +49,15 @@ const plugins = [
     extensions,
     include: ['src/**', 'node_modules/**'],
     presets: [
-      ['@babel/preset-env', {
-        targets: { ios: '12', android: '21' },
-        modules: false,
-      }],
+      [
+        '@babel/preset-env',
+        {
+          targets: { ios: '12', android: '21' },
+          modules: false,
+        },
+      ],
     ],
-    plugins: [
-      ['@babel/plugin-syntax-import-attributes', { deprecatedAssertSyntax: true }],
-    ],
+    plugins: [['@babel/plugin-syntax-import-attributes', { deprecatedAssertSyntax: true }]],
   }),
   terser({ format: { comments: false } }),
 ];
@@ -92,8 +93,10 @@ const poTokenRuntime = {
         for (const fileName of Object.keys(bundle)) delete bundle[fileName];
         this.emitFile({
           type: 'asset',
-          fileName: 'youtube-po-token.html',
-          source: `<!doctype html><!--\n${bgUtilsLicense}\n--><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><script>${chunk.code.replace(/<\/script/gi, '<\\/script')}</script></head><body></body></html>`,
+          fileName: 'youtube-po-token.json',
+          source: JSON.stringify(
+            `<!doctype html><!--\n${bgUtilsLicense}\n--><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><script>${chunk.code.replace(/<\/script/gi, '<\\/script')}</script></head><body></body></html>`
+          ),
         });
       },
     },
