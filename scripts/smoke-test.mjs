@@ -9,9 +9,12 @@ import { JSDOM } from 'jsdom';
 const require = createRequire(import.meta.url);
 const VIDEO_ID = 'dQw4w9WgXcQ';
 const REPORTED_VIDEO_IDS = [
-  // Pinkfong Baby Shark exercises the PO-token path: its mobile-client URL
-  // allows early bytes but rejects later ranges without content attestation.
+  // Pinkfong Baby Shark exercises the made-for-kids client path: its regular
+  // mobile-client URLs allow early bytes but reject later ranges.
   'XqZsoesa55w',
+  // Reported from iOS TestFlight build 133 after the native integrity
+  // transport fix. Keep the exact production regression in the live suite.
+  'eoJecvGMR6E',
 ];
 const RANGE_START = 128 * 1024;
 const RANGE_LENGTH = 1024;
@@ -47,12 +50,12 @@ if (typeof factory !== 'function') {
 const sourceStorage = new Map();
 let sawAndroidVrUserAgent = false;
 let sawIosUserAgent = false;
-let sawProtectedPlayerPoToken = false;
+let sawVisionOsUserAgent = false;
+let sawKidsUserAgent = false;
 let forcedIndexedHlsRetry = false;
 let generatedPoTokenCount = 0;
 let playerEvaluationCount = 0;
 let browserMediaProbeCount = 0;
-let nativeProtectedBlocksRemaining = 3;
 
 async function generatePoToken(request) {
   const dom = new JSDOM('<!doctype html><html><head></head><body></body></html>', {
@@ -126,13 +129,10 @@ const sourceFetch = async (input, init) => {
         sawAndroidVrUserAgent = userAgent.includes('youtube.vr.oculus');
       } else if (clientName === 'iOS') {
         sawIosUserAgent = userAgent.includes('com.google.ios.youtube');
-      }
-      if (
-        payload?.videoId === REPORTED_VIDEO_IDS[0] &&
-        typeof payload?.serviceIntegrityDimensions?.poToken === 'string' &&
-        payload.serviceIntegrityDimensions.poToken.length > 0
-      ) {
-        sawProtectedPlayerPoToken = true;
+      } else if (clientName === 'VISIONOS') {
+        sawVisionOsUserAgent = userAgent.includes('Version/26.0 Safari');
+      } else if (clientName === 'WEB_KIDS') {
+        sawKidsUserAgent = userAgent.includes('Chrome/140.0.0.0');
       }
     } catch {
       // Ignore non-JSON requests.
@@ -144,17 +144,6 @@ const sourceFetch = async (input, init) => {
   // far one-byte qualification probe receives the 403 seen in production.
   const range = new Headers(init?.headers).get('Range');
   const oneByteRange = range?.match(/^bytes=(\d+)-\1$/);
-  const requestUrl = typeof input === 'string' ? input : input.url;
-  if (
-    sawProtectedPlayerPoToken &&
-    nativeProtectedBlocksRemaining > 0 &&
-    oneByteRange &&
-    requestUrl.includes('.googlevideo.com/') &&
-    new URL(requestUrl).searchParams.has('pot')
-  ) {
-    nativeProtectedBlocksRemaining--;
-    return new Response(null, { status: 403 });
-  }
   if (!forcedIndexedHlsRetry && oneByteRange && Number(oneByteRange[1]) > 1024 * 1024) {
     forcedIndexedHlsRetry = true;
     return new Response(null, { status: 403 });
@@ -228,11 +217,6 @@ try {
   if (!streamProbe.ok || streamBytes.length === 0) {
     throw new Error(
       `Playback probe failed: HTTP ${streamProbe.status}, ${streamBytes.length} bytes`
-    );
-  }
-  if (!sawAndroidVrUserAgent || !sawIosUserAgent) {
-    throw new Error(
-      `Media client User-Agent mismatch: IOS=${sawIosUserAgent}, ANDROID_VR=${sawAndroidVrUserAgent}`
     );
   }
   // Regression coverage for both mobile 403 reports. Resolve both paths
@@ -335,21 +319,20 @@ try {
       indexedHlsSegmentBytes,
     });
   }
-  if (!sawProtectedPlayerPoToken) {
-    throw new Error('Protected player request did not include its content-bound PO token');
+  if (!sawVisionOsUserAgent || !sawKidsUserAgent || !sawIosUserAgent) {
+    throw new Error(
+      `Media client User-Agent mismatch: IOS=${sawIosUserAgent}, VISIONOS=${sawVisionOsUserAgent}, YTKIDS=${sawKidsUserAgent}`
+    );
   }
   if (playerEvaluationCount === 0) {
-    throw new Error('Protected playback did not use the host player evaluator');
-  }
-  if (browserMediaProbeCount < 3 || nativeProtectedBlocksRemaining !== 0) {
-    throw new Error('Protected playback did not recover from native 403s in the browser context');
+    throw new Error('Ciphered Kids playback did not use the host player evaluator');
   }
 
   if (!forcedIndexedHlsRetry) {
     throw new Error('Indexed HLS fresh-URL retry was not exercised');
   }
-  if (generatedPoTokenCount === 0) {
-    throw new Error('Protected-track PO-token fallback was not exercised');
+  if (generatedPoTokenCount !== 0) {
+    throw new Error('Reported tracks unexpectedly fell through to fragile PO-token playback');
   }
 
   console.log(
@@ -366,10 +349,11 @@ try {
         mediaClientHeaders: {
           ios: sawIosUserAgent,
           androidVr: sawAndroidVrUserAgent,
+          visionOs: sawVisionOsUserAgent,
+          kids: sawKidsUserAgent,
         },
         reportedResults,
         generatedPoTokenCount,
-        protectedPlayerPoToken: sawProtectedPlayerPoToken,
         playerEvaluationCount,
         browserMediaProbeCount,
       },

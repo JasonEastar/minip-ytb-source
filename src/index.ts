@@ -37,9 +37,11 @@ const IOS_USER_AGENT =
   'com.google.ios.youtube/20.11.6 (iPhone10,4; U; CPU iOS 16_7_7 like Mac OS X)';
 const ANDROID_VR_USER_AGENT =
   'com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip';
+const VISIONOS_USER_AGENT =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15';
 const WEB_USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36';
-type MediaClient = 'ANDROID_VR' | 'IOS';
+type MediaClient = 'VISIONOS' | 'YTKIDS' | 'ANDROID_VR' | 'IOS';
 type OfficialVideoInfo = Awaited<ReturnType<Innertube['getBasicInfo']>>;
 type OfficialFormat = NonNullable<OfficialVideoInfo['streaming_data']>['adaptive_formats'][number];
 type VerifiedDirectAudio = {
@@ -54,8 +56,14 @@ type IndexedMediaSegment = {
   durationSeconds: number;
 };
 
-const MEDIA_CLIENTS: readonly MediaClient[] = ['ANDROID_VR', 'IOS'];
+// VisionOS currently returns complete token-free URLs for regular videos,
+// while the Kids client does the same for made-for-kids videos such as Baby
+// Shark. Keep the older mobile clients as fallbacks because availability is
+// content-dependent.
+const MEDIA_CLIENTS: readonly MediaClient[] = ['VISIONOS', 'YTKIDS', 'ANDROID_VR', 'IOS'];
 const MEDIA_USER_AGENTS: Record<MediaClient, string> = {
+  VISIONOS: VISIONOS_USER_AGENT,
+  YTKIDS: WEB_USER_AGENT,
   ANDROID_VR: ANDROID_VR_USER_AGENT,
   IOS: IOS_USER_AGENT,
 };
@@ -130,9 +138,11 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
             ? ANDROID_VR_USER_AGENT
             : clientName === 'iOS'
               ? IOS_USER_AGENT
-              : clientName === 'WEB' || clientName === 'WEB_REMIX'
-                ? WEB_USER_AGENT
-                : undefined;
+              : clientName === 'VISIONOS'
+                ? VISIONOS_USER_AGENT
+                : clientName === 'WEB' || clientName === 'WEB_REMIX' || clientName === 'WEB_KIDS'
+                  ? WEB_USER_AGENT
+                  : undefined;
         if (userAgent) {
           const adjustedHeaders = new Headers(headers);
           adjustedHeaders.set('User-Agent', userAgent);
@@ -147,7 +157,7 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
 
   function selectAudioFormats(info: OfficialVideoInfo): OfficialFormat[] {
     return (info.streaming_data?.adaptive_formats ?? [])
-      .filter((format) => format.has_audio && !format.has_video && Boolean(format.url))
+      .filter((format) => format.has_audio && !format.has_video)
       .sort((a, b) => {
         // Cache files use an m4a extension, so prefer AAC/MP4 over Opus/WebM.
         const aIsMp4 = a.mime_type.includes('audio/mp4') ? 1 : 0;
@@ -319,11 +329,12 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
     contentId: string,
     useCache: boolean
   ): Promise<VerifiedDirectAudio> {
+    if (!mediaYt) throw new Error('YouTube.js media client is unavailable');
+    const player = mediaYt.session.player;
     const failures: string[] = [];
 
-    // Android VR currently exposes regular HTTPS formats without requiring a
-    // GVS Proof-of-Origin token. iOS is retained as a fallback because client
-    // enforcement varies by video and network.
+    // Try complete token-free clients before falling back to browser
+    // attestation. Client availability varies by video and audience setting.
     for (const client of MEDIA_CLIENTS) {
       try {
         const info = await getOfficialVideoInfo(contentId, client, useCache);
@@ -337,8 +348,18 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
 
         const headers = { 'User-Agent': MEDIA_USER_AGENTS[client] };
         for (const format of formats) {
-          if (!format.url) continue;
-          const probe = await probeMediaUrl(format.url, headers, true);
+          let mediaUrl = format.url;
+          if (!mediaUrl) {
+            try {
+              if (!player) throw new Error('YouTube player script is unavailable');
+              mediaUrl = await format.decipher(player);
+            } catch (error) {
+              failures.push(`${client} itag ${format.itag}: ${errorMessage(error)}`);
+              continue;
+            }
+          }
+
+          const probe = await probeMediaUrl(mediaUrl, headers, true);
           if (probe.ok) {
             const qualificationRanges = ['bytes=0-'];
             const contentLength = format.content_length ?? 0;
@@ -352,7 +373,7 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
 
             let qualified = true;
             for (const range of qualificationRanges) {
-              const rangeProbe = await host.fetch(format.url, {
+              const rangeProbe = await host.fetch(mediaUrl, {
                 headers: { ...headers, Range: range },
               });
               const rangeOk = rangeProbe.status === 206;
@@ -363,7 +384,13 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
                 break;
               }
             }
-            if (qualified) return { client, format, headers };
+            if (qualified) {
+              return {
+                client,
+                format: { ...format, url: mediaUrl } as OfficialFormat,
+                headers,
+              };
+            }
             continue;
           }
 
@@ -556,7 +583,7 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
   const source: MediaSource = {
     id: SOURCE_ID,
     name: 'YouTube Music',
-    version: '1.4.1',
+    version: '1.4.2',
     capabilities: {
       audio: true,
       video: true,
