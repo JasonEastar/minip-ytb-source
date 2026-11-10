@@ -102,7 +102,8 @@ const poTokenRuntime = {
     },
   ],
   output: {
-    dir: '../../assets',
+    // Released next to the bundle; the app copies it into its assets.
+    dir: 'dist',
     format: 'iife',
   },
 };

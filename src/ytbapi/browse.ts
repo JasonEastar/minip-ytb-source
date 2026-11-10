@@ -530,19 +530,20 @@ export class BrowseService {
    * Get search suggestions/autocomplete.
    */
   async getSearchSuggestions(query: string, lang = 'en', country = 'us'): Promise<SearchSuggestion[]> {
-    const url = `https://suggestqueries-clients6.youtube.com/complete/search?client=youtube&ds=yt&q=${encodeURIComponent(query)}&hl=${lang}&gl=${country}&xhr=t&xssi=t`;
+    // `client=firefox` answers UTF-8 JSON `[query, [suggestions...]]`; the
+    // `client=youtube` variant is ISO-8859-1 with HTML entities and mangles
+    // non-Latin text (e.g. Vietnamese) once decoded as UTF-8.
+    const url = `https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q=${encodeURIComponent(query)}&hl=${lang}&gl=${country}`;
 
     try {
       const resp = await this.http.request(url, { method: 'GET', headers: {} });
-      const text = await resp.text();
-      // Response starts with ")]}'\n"
-      const jsonStr = text.replace(/^\)\]\}'\n?/, '');
-      const data = JSON.parse(jsonStr);
+      const data = JSON.parse(await resp.text());
 
       if (Array.isArray(data) && Array.isArray(data[1])) {
-        return data[1].map((item: any) => ({
-          text: Array.isArray(item) ? item[0] : String(item),
-        }));
+        return data[1]
+          .map((item: unknown) => (Array.isArray(item) ? item[0] : item))
+          .filter((text: unknown): text is string => typeof text === 'string' && text.length > 0)
+          .map((text: string) => ({ text }));
       }
       return [];
     } catch {

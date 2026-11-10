@@ -1,5 +1,11 @@
 node_modules/
 dist/
 *.tgz
-packages/ytbapi/dist/
-packages/ytbapi/node_modules/
+
+
+GEMINI.md
+CLAUDE.md
+.claude/*
+/docs/*
+/guide/*
+/plans/*

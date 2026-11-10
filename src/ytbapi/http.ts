@@ -28,10 +28,18 @@ export interface HttpAdapter {
 }
 
 /**
- * Default HTTP adapter using the global `fetch` API.
- * Works in Node.js 18+, React Native, and modern browsers.
+ * HTTP adapter backed by a `fetch` implementation.
+ * Defaults to the global `fetch`; the source passes `host.fetch` so every
+ * request goes through the app's native transport.
  */
 export class FetchHttpAdapter implements HttpAdapter {
+  private readonly fetchImpl: typeof globalThis.fetch;
+
+  constructor(fetchImpl: typeof globalThis.fetch = globalThis.fetch) {
+    // Wrap so browser fetch is not invoked as a method of this adapter.
+    this.fetchImpl = (input, init) => fetchImpl(input, init);
+  }
+
   async request(
     url: string,
     options: {
@@ -40,7 +48,7 @@ export class FetchHttpAdapter implements HttpAdapter {
       body?: string;
     },
   ): Promise<HttpResponse> {
-    const response = await fetch(url, {
+    const response = await this.fetchImpl(url, {
       method: options.method,
       headers: options.headers,
       body: options.body,

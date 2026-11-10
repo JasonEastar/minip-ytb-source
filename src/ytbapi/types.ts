@@ -303,7 +303,6 @@ export interface SessionOptions {
   location?: string;
   userAgent?: string;
   poToken?: string;
-  playerId?: string;
   retrieveInnertubeConfig?: boolean;
   accountIndex?: number;
   cookie?: string;
@@ -312,12 +311,6 @@ export interface SessionOptions {
    * Implement `SessionCacheAdapter` to use AsyncStorage, localStorage, SQLite, etc.
    */
   sessionCache?: import('./session.js').SessionCacheAdapter;
-  /**
-   * Skip fetching the player JS (~1MB download). Set to `true` if you don't need
-   * signatureTimestamp (e.g., when using iOS/Android client for direct URLs).
-   * Saves ~300-500ms on cold start.
-   */
-  skipPlayerFetch?: boolean;
   /**
    * Maximum age of a cached session snapshot in milliseconds.
    * Default: 6 hours (21600000ms). After this, a fresh session is created.

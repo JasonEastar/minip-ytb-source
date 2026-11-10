@@ -22,9 +22,8 @@ export interface RequestBody {
   contentCheckOk: boolean;
   racyCheckOk: boolean;
   playbackContext: {
-    contentPlaybackContext: {
-      signatureTimestamp?: string;
-    };
+    // Mobile clients (IOS) return direct URLs and need no signatureTimestamp.
+    contentPlaybackContext: Record<string, never>;
   };
   context?: InnertubeContext;
 }
@@ -32,20 +31,14 @@ export interface RequestBody {
 /**
  * Creates a request body for a player request.
  */
-export function createRequestBody(
-  videoId: string,
-  session: Session,
-  client?: string,
-): RequestBody {
+export function createRequestBody(videoId: string, client?: string): RequestBody {
   return {
     videoId,
     client,
     contentCheckOk: true,
     racyCheckOk: true,
     playbackContext: {
-      contentPlaybackContext: {
-        signatureTimestamp: session.signatureTimestamp,
-      },
+      contentPlaybackContext: {},
     },
   };
 }

@@ -7,7 +7,9 @@
   "types": "src/types/index.ts",
   "scripts": {
     "build": "npx rimraf dist && npx rollup -c rollup.config.mjs",
+    "test": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test \"test/**/*.test.mjs\"",
     "test:smoke": "npm run build && node scripts/smoke-test.mjs",
+    "play": "node scripts/play.mjs",
     "typecheck": "tsc --noEmit",
     "clean": "rimraf dist"
   },
@@ -34,11 +36,10 @@
   },
   "files": [
     "dist/",
-    "types/",
     "manifest.json",
     "README.md"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=22.18"
   }
 }

@@ -12,7 +12,13 @@
  */
 
 import { ClientType, Innertube, Platform } from 'youtubei.js/react-native';
-import { InnertubeService } from './ytbapi';
+import { FetchHttpAdapter, InnertubeService } from './ytbapi';
+import { id, name, version, capabilities } from '../manifest.json';
+import {
+  buildIndexedHlsPlaylist,
+  coalesceHlsSegments,
+  parseSidxSegments,
+} from './indexed-hls-playlist';
 import type { SourceHost } from './types/host';
 import type { MediaSource } from './types/source';
 import type {
@@ -28,11 +34,10 @@ import type {
   ArtistSection,
 } from './types/media';
 
-const SOURCE_ID = 'youtube';
+const SOURCE_ID = id;
 const VIDEO_INFO_CACHE_MS = 4 * 60 * 1000;
 const MEDIA_PROBE_TIMEOUT_MS = 10 * 1000;
 const DOWNLOAD_RANGE_HEADER = 'bytes=0-';
-const HLS_SEGMENT_TARGET_SECONDS = 6;
 const IOS_USER_AGENT =
   'com.google.ios.youtube/20.11.6 (iPhone10,4; U; CPU iOS 16_7_7 like Mac OS X)';
 const ANDROID_VR_USER_AGENT =
@@ -50,11 +55,6 @@ type VerifiedDirectAudio = {
   headers: Record<string, string>;
 };
 type CachedPoToken = { token: string; expiresAt: number };
-type IndexedMediaSegment = {
-  offset: number;
-  size: number;
-  durationSeconds: number;
-};
 
 // VisionOS currently returns complete token-free URLs for regular videos,
 // while the Kids client does the same for made-for-kids videos such as Baby
@@ -408,93 +408,6 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
     throw new Error(`No verified direct audio URL (${failures.join('; ')})`);
   }
 
-  function readUint64(view: DataView, offset: number): number {
-    return view.getUint32(offset) * 2 ** 32 + view.getUint32(offset + 4);
-  }
-
-  function parseSidxSegments(data: Uint8Array, absoluteDataOffset: number): IndexedMediaSegment[] {
-    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-    let boxOffset = 0;
-
-    while (boxOffset + 8 <= data.byteLength) {
-      let boxSize = view.getUint32(boxOffset);
-      const boxType = String.fromCharCode(
-        data[boxOffset + 4],
-        data[boxOffset + 5],
-        data[boxOffset + 6],
-        data[boxOffset + 7]
-      );
-      let headerSize = 8;
-      if (boxSize === 1) {
-        if (boxOffset + 16 > data.byteLength) break;
-        boxSize = readUint64(view, boxOffset + 8);
-        headerSize = 16;
-      }
-      if (boxSize < headerSize || boxOffset + boxSize > data.byteLength) break;
-
-      if (boxType !== 'sidx') {
-        boxOffset += boxSize;
-        continue;
-      }
-
-      const fullBoxOffset = boxOffset + headerSize;
-      const version = data[fullBoxOffset];
-      const timescale = view.getUint32(fullBoxOffset + 8);
-      if (timescale <= 0) return [];
-
-      let cursor = fullBoxOffset + 12;
-      cursor += version === 0 ? 4 : 8; // earliest_presentation_time
-      const firstOffset = version === 0 ? view.getUint32(cursor) : readUint64(view, cursor);
-      cursor += version === 0 ? 4 : 8;
-      cursor += 2; // reserved
-      const referenceCount = view.getUint16(cursor);
-      cursor += 2;
-
-      let mediaOffset = absoluteDataOffset + boxOffset + boxSize + firstOffset;
-      const segments: IndexedMediaSegment[] = [];
-      for (let index = 0; index < referenceCount; index++) {
-        if (cursor + 12 > boxOffset + boxSize) return [];
-        const reference = view.getUint32(cursor);
-        const referenceType = reference >>> 31;
-        const size = reference & 0x7fffffff;
-        const duration = view.getUint32(cursor + 4);
-        cursor += 12;
-        if (referenceType !== 0 || size <= 0 || duration <= 0) return [];
-
-        segments.push({
-          offset: mediaOffset,
-          size,
-          durationSeconds: duration / timescale,
-        });
-        mediaOffset += size;
-      }
-      return segments;
-    }
-
-    return [];
-  }
-
-  function coalesceHlsSegments(segments: IndexedMediaSegment[]): IndexedMediaSegment[] {
-    const grouped: IndexedMediaSegment[] = [];
-    let current: IndexedMediaSegment | null = null;
-
-    for (const segment of segments) {
-      if (!current) {
-        current = { ...segment };
-      } else {
-        current.size += segment.size;
-        current.durationSeconds += segment.durationSeconds;
-      }
-
-      if (current.durationSeconds >= HLS_SEGMENT_TARGET_SECONDS) {
-        grouped.push(current);
-        current = null;
-      }
-    }
-    if (current) grouped.push(current);
-    return grouped;
-  }
-
   async function createIndexedHlsStream(
     contentId: string,
     resolved: VerifiedDirectAudio
@@ -549,27 +462,7 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
       if (!ok) return null;
     }
 
-    const targetDuration = Math.max(
-      1,
-      Math.ceil(Math.max(...segments.map((segment) => segment.durationSeconds)))
-    );
-    const escapedMediaUrl = mediaUrl.replace(/"/g, '%22');
-    const initLength = initRange.end - initRange.start + 1;
-    const manifest = [
-      '#EXTM3U',
-      '#EXT-X-VERSION:7',
-      `#EXT-X-TARGETDURATION:${targetDuration}`,
-      '#EXT-X-MEDIA-SEQUENCE:0',
-      '#EXT-X-PLAYLIST-TYPE:VOD',
-      `#EXT-X-MAP:URI="${escapedMediaUrl}",BYTERANGE="${initLength}@${initRange.start}"`,
-      ...segments.flatMap((segment) => [
-        `#EXTINF:${segment.durationSeconds.toFixed(6)},`,
-        `#EXT-X-BYTERANGE:${segment.size}@${segment.offset}`,
-        escapedMediaUrl,
-      ]),
-      '#EXT-X-ENDLIST',
-      '',
-    ].join('\n');
+    const manifest = buildIndexedHlsPlaylist({ mediaUrl, initRange, segments });
 
     return {
       url: host.writeCacheFile(`youtube-${contentId}-${Date.now()}.m3u8`, manifest),
@@ -581,24 +474,15 @@ export default function createYouTubeSource(host: SourceHost): MediaSource {
   // ── Source Implementation ───────────────────────────────────
 
   const source: MediaSource = {
-    id: SOURCE_ID,
-    name: 'YouTube Music',
-    version: '1.4.2',
-    capabilities: {
-      audio: true,
-      video: true,
-      search: true,
-      feed: true,
-      suggestions: true,
-      playlists: true,
-      movies: false,
-      subtitles: false,
-    },
+    // Metadata comes from manifest.json so the bundle and the manifest it was
+    // released with can never disagree (CI patches the manifest before build).
+    id,
+    name,
+    version,
+    capabilities,
 
     async initialize(): Promise<void> {
-      yt = new InnertubeService({
-        disableDecipher: true, // IOS client provides direct URLs
-      });
+      yt = new InnertubeService({ httpAdapter: new FetchHttpAdapter(host.fetch) });
 
       try {
         // The React Native entry intentionally ships without an evaluator.

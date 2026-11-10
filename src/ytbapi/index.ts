@@ -16,10 +16,6 @@
  * const results = await yt.search('never gonna give you up');
  * const videos = await yt.searchVideos('lofi beats');
  * const channels = await yt.searchChannels('rick astley');
- *
- * // YouTube Music
- * const songs = await yt.music.searchSongs('bohemian rhapsody');
- * const album = await yt.music.getAlbum('MPREb_...');
  * ```
  */
 
@@ -42,23 +38,6 @@ export type {
   SearchFeature,
   SearchSortBy,
 } from './browse.js';
-
-// YouTube Music
-export { YouTubeMusicService, YTMUSIC_BROWSE_IDS, YTMUSIC_SEARCH_FILTERS } from './music.js';
-export type {
-  MusicItem,
-  MusicSection,
-  MusicSearchResponse,
-  MusicBrowseResponse,
-} from './music.js';
-
-// DASH MPD Builder
-export { buildDashManifest, buildDashManifestDataUri } from './dash.js';
-export type { DashManifestOptions } from './dash.js';
-
-// Decipher
-export { loadPlayerFunctions, decipherFormat, decipherAllFormats, invalidatePlayerCache } from './decipher.js';
-export type { PlayerCache } from './decipher.js';
 
 // Session
 export { Session } from './session.js';
@@ -106,9 +85,6 @@ export type { InnertubeContext, InnertubeClient } from './context.js';
 // Constants
 export { URLS, CLIENTS, CLIENT_NAME_IDS, SUPPORTED_CLIENTS } from './constants.js';
 export type { ClientConfig } from './constants.js';
-
-// User agents
-export { UserAgents, DeviceCategory, getRandomUserAgent } from './user-agents.js';
 
 // Utilities
 export {

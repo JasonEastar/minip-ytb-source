@@ -16,7 +16,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
@@ -48,6 +48,23 @@ jobs:
       - name: Build bundle
         run: npm run build
 
+      # Gate: bundle must load like the app loads it and match the manifest.
+      - name: Test
+        run: npm test
+
+      - name: Add bundle hash to manifest
+        id: hash
+        run: |
+          SHA=$(sha256sum dist/youtube.bundle.js | cut -d' ' -f1)
+          echo "sha=${SHA}" >> $GITHUB_OUTPUT
+          node -e "
+            const fs = require('fs');
+            const m = JSON.parse(fs.readFileSync('manifest.json', 'utf8'));
+            m.bundleSha256 = '${SHA}';
+            fs.writeFileSync('manifest.json', JSON.stringify(m, null, 2) + '\n');
+          "
+          cat manifest.json
+
       - name: Copy manifest to dist
         run: cp manifest.json dist/manifest.json
 
@@ -68,7 +85,16 @@ jobs:
             ```
             https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/manifest.json
             ```
+
+            **WebView runtime (ship inside the app):**
+            ```
+            https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/youtube-po-token.json
+            ```
+
+            **Bundle SHA-256:** `${{ steps.hash.outputs.sha }}`
           files: |
             dist/youtube.bundle.js
             dist/manifest.json
+            dist/youtube-po-token.json
           make_latest: true
+          fail_on_unmatched_files: true

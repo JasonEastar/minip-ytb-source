@@ -13,8 +13,6 @@ import type {
 import { URLS, CLIENTS } from './constants.js';
 import { generateRandomString } from './utils.js';
 import { buildInnertubeContext, type InnertubeContext } from './context.js';
-import { getStringBetweenStrings } from './utils.js';
-import { DeviceCategory, getRandomUserAgent } from './user-agents.js';
 
 // ==================== Types ====================
 
@@ -42,10 +40,6 @@ export interface SessionSnapshot {
   context: InnertubeContext;
   /** User-Agent used for this session */
   userAgent: string;
-  /** Player version ID (e.g., "2f1b3c4d") */
-  playerId?: string;
-  /** Signature timestamp from player JS (e.g., "20073") — changes every few days */
-  signatureTimestamp?: string;
   /** InnerTube config data */
   configData?: string;
   /** When this snapshot was created (ISO string) */
@@ -95,11 +89,8 @@ export class Session {
   readonly userAgent: string;
   readonly cookie: string | undefined;
   readonly poToken: string | undefined;
-  readonly signatureTimestamp: string | undefined;
-  readonly playerId: string | undefined;
-  readonly playerUrl: string | undefined;
 
-  private static cached: { playerId?: string; session: Session } | null = null;
+  private static cached: Session | null = null;
 
   private constructor(params: {
     context: InnertubeContext;
@@ -110,9 +101,6 @@ export class Session {
     userAgent: string;
     cookie?: string;
     poToken?: string;
-    signatureTimestamp?: string;
-    playerId?: string;
-    playerUrl?: string;
   }) {
     this.context = params.context;
     this.apiKey = params.apiKey;
@@ -122,9 +110,6 @@ export class Session {
     this.userAgent = params.userAgent;
     this.cookie = params.cookie;
     this.poToken = params.poToken;
-    this.signatureTimestamp = params.signatureTimestamp;
-    this.playerId = params.playerId;
-    this.playerUrl = params.playerUrl;
   }
 
   // ==================== Factory ====================
@@ -135,19 +120,14 @@ export class Session {
    * Resolution order:
    * 1. In-memory cache (fastest — same process)
    * 2. External cache adapter (fast — skips network)
-   * 3. Fresh session (slow — 3–4 network requests)
+   * 3. Fresh session (slow — 2 network requests)
    */
   static async create(
     http: HttpAdapter,
     options?: SessionOptions,
   ): Promise<Session | null> {
     // 1. In-memory cache
-    if (
-      Session.cached &&
-      Session.cached.playerId === options?.playerId
-    ) {
-      return Session.cached.session;
-    }
+    if (Session.cached) return Session.cached;
 
     // 2. External cache adapter
     const cacheAdapter = options?.sessionCache;
@@ -155,7 +135,7 @@ export class Session {
       const snapshot = await cacheAdapter.get();
       if (snapshot && Session.isSnapshotValid(snapshot, options?.maxSessionAge)) {
         const session = Session.fromSnapshot(snapshot, options);
-        Session.cached = { playerId: options?.playerId, session };
+        Session.cached = session;
         return session;
       }
     }
@@ -164,7 +144,7 @@ export class Session {
     const session = await Session.buildFreshSession(http, options);
     if (!session) return null;
 
-    Session.cached = { playerId: options?.playerId, session };
+    Session.cached = session;
 
     // Persist to external cache
     if (cacheAdapter) {
@@ -188,8 +168,6 @@ export class Session {
       apiVersion: this.apiVersion,
       context: this.context,
       userAgent: this.userAgent,
-      playerId: this.playerId,
-      signatureTimestamp: this.signatureTimestamp,
       configData: this.configData,
       createdAt: new Date().toISOString(),
     };
@@ -208,9 +186,6 @@ export class Session {
       userAgent: snapshot.userAgent,
       cookie: options?.cookie,
       poToken: options?.poToken,
-      signatureTimestamp: snapshot.signatureTimestamp,
-      playerId: snapshot.playerId,
-      playerUrl: snapshot.playerId ? Session.getPlayerUrl(snapshot.playerId) : undefined,
     });
   }
 
@@ -257,15 +232,13 @@ export class Session {
     // Build context
     const context = buildInnertubeContext(args, deviceInfo);
 
-    // Step 2 & 3: Fetch config + player in PARALLEL
-    const [configResult, playerInfo] = await Promise.all([
+    // Step 2: Fetch config. The player script is not fetched: the IOS /player
+    // request used by this source needs no signatureTimestamp, and the old
+    // parser produced an invalid value that YouTube rejected with HTTP 400.
+    const configResult =
       options?.retrieveInnertubeConfig !== false
-        ? Session.fetchInnertubeConfig(http, sessionDataResult, context)
-        : Promise.resolve(null),
-      options?.skipPlayerFetch
-        ? Promise.resolve({ playerId: undefined, signatureTimestamp: undefined })
-        : Session.fetchPlayerInfo(http, options?.playerId),
-    ]);
+        ? await Session.fetchInnertubeConfig(http, sessionDataResult, context)
+        : null;
 
     // Apply config data
     let configData: string | undefined;
@@ -295,41 +268,7 @@ export class Session {
       userAgent: args.userAgent,
       cookie: options?.cookie,
       poToken: options?.poToken,
-      signatureTimestamp: playerInfo.signatureTimestamp,
-      playerId: playerInfo.playerId,
-      playerUrl: playerInfo.playerId ? Session.getPlayerUrl(playerInfo.playerId) : undefined,
     });
-  }
-
-  /**
-   * Fetches playerId + signatureTimestamp in 2 sequential calls.
-   * This is the slowest part (~500-700ms) because the player JS is ~1MB.
-   */
-  private static async fetchPlayerInfo(
-    http: HttpAdapter,
-    existingPlayerId?: string,
-  ): Promise<{ playerId?: string; signatureTimestamp?: string }> {
-    const playerId = existingPlayerId ?? (await Session.getPlayerId(http));
-    if (!playerId) return {};
-
-    const playerUrl = Session.getPlayerUrl(playerId);
-    let signatureTimestamp: string | undefined;
-
-    try {
-      const resp = await http.request(playerUrl, {
-        method: 'GET',
-        headers: { 'User-Agent': getRandomUserAgent(DeviceCategory.DESKTOP) },
-      });
-      const playerJs = await resp.text();
-      signatureTimestamp =
-        getStringBetweenStrings(playerJs, 'signatureTimestamp:', ',') ??
-        getStringBetweenStrings(playerJs, 'sts:', ',') ??
-        undefined;
-    } catch {
-      // ignore
-    }
-
-    return { playerId, signatureTimestamp };
   }
 
   // ==================== Validation ====================
@@ -448,24 +387,5 @@ export class Session {
     } catch {
       return null;
     }
-  }
-
-  // ==================== Player ID ====================
-
-  static async getPlayerId(http: HttpAdapter): Promise<string | undefined> {
-    try {
-      const resp = await http.request(`${URLS.YT_BASE}/iframe_api`, {
-        method: 'GET',
-        headers: {},
-      });
-      const text = await resp.text();
-      return getStringBetweenStrings(text, 'player\\/', '\\/') ?? undefined;
-    } catch {
-      return undefined;
-    }
-  }
-
-  static getPlayerUrl(playerId: string): string {
-    return `${URLS.YT_BASE}/s/player/${playerId}/player_ias.vflset/en_US/base.js`;
   }
 }

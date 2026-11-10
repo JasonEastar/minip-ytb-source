@@ -12,10 +12,6 @@ import { Session } from './session.js';
 import { HTTPClient, createRequestBody, type RequestInit } from './http-client.js';
 import { buildFormatInfo } from './format-helpers.js';
 import { BrowseService, SEARCH_FILTERS, SearchFilter, type SearchFilterOptions, type BrowseResponse, type SearchResponse, type SearchSuggestion } from './browse.js';
-import { YouTubeMusicService, type MusicSearchResponse, type MusicBrowseResponse, type MusicItem } from './music.js';
-import { buildDashManifest, buildDashManifestDataUri, type DashManifestOptions } from './dash.js';
-import { loadPlayerFunctions, decipherFormat, type PlayerCache } from './decipher.js';
-import type { StreamingFormat } from './types.js';
 
 export interface InnertubeServiceOptions extends SessionOptions {
   /**
@@ -23,25 +19,17 @@ export interface InnertubeServiceOptions extends SessionOptions {
    * Provide your own if you need custom networking (e.g., proxies, interceptors).
    */
   httpAdapter?: HttpAdapter;
-  /**
-   * Disable signature deciphering. Default: false.
-   * When disabled, WEB client formats with signatureCipher won't have URLs.
-   * iOS/Android clients don't need deciphering.
-   */
-  disableDecipher?: boolean;
 }
 
 export class InnertubeService {
   private http: HttpAdapter;
   private options: InnertubeServiceOptions;
   private _browse: BrowseService;
-  private _music: YouTubeMusicService;
 
   constructor(options: InnertubeServiceOptions = {}) {
     this.http = options.httpAdapter ?? new FetchHttpAdapter();
     this.options = options;
     this._browse = new BrowseService(this.http, options);
-    this._music = new YouTubeMusicService(this.http, options);
   }
 
   /** Access the browse/search service directly for advanced usage */
@@ -49,20 +37,13 @@ export class InnertubeService {
     return this._browse;
   }
 
-  /** Access YouTube Music service directly */
-  get music(): YouTubeMusicService {
-    return this._music;
-  }
-
   // ==================== Player / Video Info ====================
 
   /**
    * Get video format info (streaming URLs, subtitles, metadata, etc.)
    *
-   * When using the WEB client (default), formats may have ciphered URLs.
-   * The library automatically deciphers them unless `disableDecipher` is set.
-   *
-   * For iOS/Android clients, URLs are returned directly (no deciphering needed).
+   * Use a mobile client (e.g. `'IOS'`): those return direct URLs. WEB formats
+   * are ciphered and this client does not decipher them.
    */
   async getVideoInfo(videoId: string, client?: string): Promise<MediaItemFormatInfo | null> {
     const session = await Session.create(this.http, this.options);
@@ -73,18 +54,13 @@ export class InnertubeService {
 
     const httpClient = new HTTPClient(session, this.http);
 
-    const body = createRequestBody(videoId, session, client);
+    const body = createRequestBody(videoId, client);
     const requestInit: RequestInit = { body };
 
     const playerResult = await httpClient.fetch('/player', requestInit);
     if (!playerResult) {
       console.error('[ytbapi] Failed to fetch player result');
       return null;
-    }
-
-    // Decipher if needed (WEB client returns ciphered URLs)
-    if (!this.options.disableDecipher) {
-      await this.decipherPlayerResult(playerResult, session, client);
     }
 
     const formatInfo = buildFormatInfo(playerResult);
@@ -97,54 +73,6 @@ export class InnertubeService {
   }
 
   /**
-   * Decipher ciphered streaming format URLs in-place.
-   */
-  private async decipherPlayerResult(
-    playerResult: PlayerResult,
-    session: Session,
-    client?: string,
-  ): Promise<void> {
-    // iOS/Android clients don't use ciphered URLs
-    const cl = client?.toUpperCase();
-    if (cl === 'IOS' || cl === 'ANDROID' || cl === 'ANDROID_VR') return;
-
-    const sd = playerResult.streamingData;
-    if (!sd) return;
-
-    // Check if any format actually needs deciphering
-    const allFormats = [...(sd.adaptiveFormats ?? []), ...(sd.formats ?? [])];
-    const hasCiphered = allFormats.some(f => f.signatureCipher || f.cipher);
-    const hasNParam = allFormats.some(f => f.url?.includes('&n='));
-
-    if (!hasCiphered && !hasNParam) return;
-
-    // Load player functions
-    let playerCache: PlayerCache | undefined;
-    try {
-      // Get player ID and URL from session
-      const playerId = session.playerId ?? (await Session.getPlayerId(this.http));
-      if (!playerId) {
-        console.warn('[ytbapi] Cannot decipher: no player ID');
-        return;
-      }
-
-      const playerUrl = Session.getPlayerUrl(playerId);
-      playerCache = await loadPlayerFunctions(this.http, playerUrl, playerId);
-    } catch (e) {
-      console.error('[ytbapi] Failed to load player functions:', e);
-      return;
-    }
-
-    // Decipher all formats
-    if (sd.adaptiveFormats) {
-      sd.adaptiveFormats = sd.adaptiveFormats.map(f => decipherFormat(f, playerCache!));
-    }
-    if (sd.formats) {
-      sd.formats = sd.formats.map(f => decipherFormat(f, playerCache!));
-    }
-  }
-
-  /**
    * Get raw player result (unprocessed response from YouTube).
    */
   async getRawPlayerResult(videoId: string, client?: string): Promise<PlayerResult | null> {
@@ -152,41 +80,8 @@ export class InnertubeService {
     if (!session) return null;
 
     const httpClient = new HTTPClient(session, this.http);
-    const body = createRequestBody(videoId, session, client);
+    const body = createRequestBody(videoId, client);
     return httpClient.fetch('/player', { body });
-  }
-
-  // ==================== DASH ====================
-
-  /**
-   * Get a DASH MPD manifest XML for a video.
-   *
-   * @param videoId YouTube video ID
-   * @param options Optional codec filtering and subtitle inclusion
-   * @returns XML string of the MPD manifest, or null
-   *
-   * @example
-   * ```typescript
-   * const mpd = await yt.getDashManifest('dQw4w9WgXcQ');
-   * // Feed to dash.js, shaka-player, ExoPlayer...
-   * ```
-   */
-  async getDashManifest(videoId: string, options?: DashManifestOptions): Promise<string | null> {
-    // IOS client provides direct URLs for adaptive formats (no deciphering needed).
-    // WEB/WEB_REMIX now return SABR-only adaptive formats without individual URLs.
-    const info = await this.getVideoInfo(videoId, 'IOS');
-    if (!info) return null;
-    return buildDashManifest(info, options);
-  }
-
-  /**
-   * Get a DASH MPD manifest as a data URI (base64-encoded).
-   * Can be loaded directly by media players.
-   */
-  async getDashManifestDataUri(videoId: string, options?: DashManifestOptions): Promise<string | null> {
-    const info = await this.getVideoInfo(videoId, 'IOS');
-    if (!info) return null;
-    return buildDashManifestDataUri(info, options);
   }
 
   // ==================== Search ====================
